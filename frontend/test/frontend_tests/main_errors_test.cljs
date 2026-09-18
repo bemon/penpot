@@ -571,3 +571,32 @@
         (let [state (ptk/update (first @events) {})]
           (t/is (nil? (get-in state [:notification :timeout])))
           (t/is (some? (get-in state [:notification :links 0]))))))))
+
+;; ---------------------------------------------------------------------------
+;; transport errors
+;; ---------------------------------------------------------------------------
+
+(t/deftest transport-errors-are-handled-without-replacing-the-page
+  (doseq [type [:network :gateway-error :rate-limit :unexpected-response]]
+    (let [reports   (atom [])
+          assigned  (atom [])
+          scheduled (atom [])
+          events    (atom [])]
+      (with-redefs [tm/schedule (mock/stub #(swap! scheduled conj %))
+                    st/emit! (mock/stub (fn [& emitted] (swap! events into emitted)))
+                    st/async-emit! (mock/stub (fn [& emitted] (swap! events into emitted)))
+                    rt/assign-exception (fn [error] (swap! assigned conj error) error)
+                    errors/submit-report (fn [& params]
+                                           (swap! reports conj (apply hash-map params)))]
+        (errors/on-error (ex-info "http error"
+                                  {:type type
+                                   :status 524
+                                   :uri "https://design.penpot.app/api/main/methods/get-teams"}))
+        (t/is (empty? @assigned)
+              (str type " must not replace the page with an error screen"))
+        (t/is (= ["handled-exception"] (map :event-name @reports))
+              (str type " is a transient transport failure, not an unhandled one"))
+        (doseq [callback @scheduled] (callback))
+        (t/is (= 1 (count @events)) (str type " must show one notification"))
+        (let [state (ptk/update (first @events) {})]
+          (t/is (= :visible (get-in state [:notification :status]))))))))
