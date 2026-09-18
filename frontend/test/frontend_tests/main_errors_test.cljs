@@ -600,3 +600,25 @@
         (t/is (= 1 (count @events)) (str type " must show one notification"))
         (let [state (ptk/update (first @events) {})]
           (t/is (= :visible (get-in state [:notification :status]))))))))
+
+(t/deftest a-save-against-an-expired-session-reaches-the-login-screen
+  ;; The save warning says nothing about authentication, so the session
+  ;; error has to reach the user through the general handler.
+  (let [assigned (atom [])
+        flashes  (atom [])
+        file-id  (uuid/next)
+        commit   {:id (uuid/next) :file-id file-id}
+        state    {:current-file-id file-id
+                  :persistence {:queue (conj #queue [] (:id commit))
+                                :index {(:id commit) commit}
+                                :status :saving}}
+        cause    (ex-info "unauthorized" {:type :authentication})]
+    (with-redefs [rt/get-current-href (constantly workspace-href)
+                  rt/assign-exception (fn [error]
+                                        (swap! assigned conj error)
+                                        (ptk/data-event ::assigned))
+                  errors/flash        (fn [& params] (swap! flashes conj params))]
+      (ptk/effect (#'dps/persistence-failed (:id commit) cause true) state (rx/empty))
+      (t/is (= 1 (count @assigned)) "the expired session is put on screen")
+      (t/is (= :authentication (:type (first @assigned))))
+      (t/is (empty? @flashes) "and not buried under a generic save warning"))))

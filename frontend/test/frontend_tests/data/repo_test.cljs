@@ -12,53 +12,37 @@
    [cuerdas.core :as str]))
 
 ;; ---------------------------------------------------------------------------
-;; retryable-error? tests (synchronous)
+;; retry classification
 ;; ---------------------------------------------------------------------------
 
-(t/deftest retryable-error-network
-  (t/testing "network error (js/fetch failure) is retryable"
-    (let [err (ex-info "network" {:type :network})]
-      (t/is (true? (repo/retryable-error? err))))))
+(t/deftest retry-classification
+  (t/testing "each failure says whether it can be repeated at once, later, or not at all"
+    (doseq [[type fast? eventual?]
+            [[:network             true  true]   ; js/fetch failure
+             [:bad-gateway         true  true]   ; 502
+             [:service-unavailable true  true]   ; 503
+             [:gateway-error       true  true]   ; 504 and the 52x family
+             [:offline             true  true]   ; browser offline
+             ;; Repeating a rate limit at once makes it worse; waiting it
+             ;; out does not.
+             [:rate-limit          false true]   ; 429
+             ;; A proxy answering in place of the backend keeps doing so,
+             ;; and retrying would hide it from the user.
+             [:unexpected-response false false]
+             [:internal            false false]
+             [:validation          false false]
+             [:authentication      false false]
+             [:authorization       false false]]]
+      (let [err (ex-info (name type) {:type type})]
+        (t/is (= fast? (repo/fast-retryable? err))
+              (str type " fast-retryable?"))
+        (t/is (= eventual? (repo/eventually-retryable? err))
+              (str type " eventually-retryable?"))))))
 
-(t/deftest retryable-error-bad-gateway
-  (t/testing "502 bad-gateway is retryable"
-    (let [err (ex-info "bad gateway" {:type :bad-gateway})]
-      (t/is (true? (repo/retryable-error? err))))))
-
-(t/deftest retryable-error-service-unavailable
-  (t/testing "503 service-unavailable is retryable"
-    (let [err (ex-info "service unavailable" {:type :service-unavailable})]
-      (t/is (true? (repo/retryable-error? err))))))
-
-(t/deftest retryable-error-offline
-  (t/testing "offline (status 0) is retryable"
-    (let [err (ex-info "offline" {:type :offline})]
-      (t/is (true? (repo/retryable-error? err))))))
-
-(t/deftest retryable-error-internal
-  (t/testing "internal error (genuine bug) is NOT retryable"
-    (let [err (ex-info "internal" {:type :internal :code :something})]
-      (t/is (not (repo/retryable-error? err))))))
-
-(t/deftest retryable-error-validation
-  (t/testing "validation error is NOT retryable"
-    (let [err (ex-info "validation" {:type :validation :code :request-body-too-large})]
-      (t/is (not (repo/retryable-error? err))))))
-
-(t/deftest retryable-error-authentication
-  (t/testing "authentication error is NOT retryable"
-    (let [err (ex-info "auth" {:type :authentication})]
-      (t/is (not (repo/retryable-error? err))))))
-
-(t/deftest retryable-error-authorization
-  (t/testing "authorization/challenge error is NOT retryable"
-    (let [err (ex-info "auth" {:type :authorization :code :challenge-required})]
-      (t/is (not (repo/retryable-error? err))))))
-
-(t/deftest retryable-error-no-ex-data
-  (t/testing "plain error without ex-data is NOT retryable"
-    (let [err (js/Error. "plain")]
-      (t/is (not (repo/retryable-error? err))))))
+(t/deftest an-error-carrying-no-data-is-never-retried
+  (let [err (js/Error. "plain")]
+    (t/is (not (repo/fast-retryable? err)))
+    (t/is (not (repo/eventually-retryable? err)))))
 
 ;; ---------------------------------------------------------------------------
 ;; with-retry tests (async, using zero-delay config for speed)
@@ -139,43 +123,6 @@
               (fn [err]
                 (t/is (= 1 @call-count))
                 (t/is (= :authentication (:type (ex-data err))))
-                (done))))))))
-
-(t/deftest with-retry-network-error-retried
-  (t/testing "network error (js/fetch failure) is retried"
-    (t/async done
-      (let [call-count (atom 0)
-            obs-fn     (fn []
-                         (let [n (swap! call-count inc)]
-                           (if (= n 1)
-                             (rx/throw (ex-info "net" {:type :network}))
-                             (rx/of :ok))))]
-        (->> (repo/with-retry obs-fn fast-config)
-             (rx/subs!
-              (fn [val]
-                (t/is (= :ok val))
-                (t/is (= 2 @call-count))
-                (done))
-              (fn [err]
-                (t/is false (str "unexpected error: " (ex-message err)))
-                (done))))))))
-
-(t/deftest with-retry-internal-not-retried
-  (t/testing "internal error (genuine bug) is not retried"
-    (t/async done
-      (let [call-count (atom 0)
-            obs-fn     (fn []
-                         (swap! call-count inc)
-                         (rx/throw (ex-info "bug" {:type :internal
-                                                   :code :something})))]
-        (->> (repo/with-retry obs-fn fast-config)
-             (rx/subs!
-              (fn [_val]
-                (t/is false "should not succeed")
-                (done))
-              (fn [err]
-                (t/is (= 1 @call-count))
-                (t/is (= :internal (:type (ex-data err))))
                 (done))))))))
 
 (t/deftest with-retry-respects-max-retries-config

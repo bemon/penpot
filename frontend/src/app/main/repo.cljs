@@ -23,20 +23,30 @@
 
 ;; -- Retry helpers -----------------------------------------------------------
 
-(def ^:private retryable-types
-  "Set of error types that are considered transient and safe to retry
-  for idempotent (GET) requests."
+(def ^:private fast-retryable-types
+  "Failures that prove the request never reached the backend."
   #{:network              ; js/fetch network-level failure
     :bad-gateway          ; 502
     :service-unavailable  ; 503
+    :gateway-error        ; 504 and the Cloudflare 52x family
     :offline})            ; status 0 (browser offline)
 
-(defn retryable-error?
-  "Return true when `error` represents a transient failure that is safe
-  to retry.  Only errors whose `ex-data` `:type` belongs to
-  `retryable-types` qualify."
+(def ^:private eventually-retryable-types
+  "Failures an identical request can still get past later. A rate limit is
+  worth waiting out but not worth repeating at once."
+  (conj fast-retryable-types
+        :rate-limit))     ; 429
+
+(defn fast-retryable?
+  "True when `error` is safe to send again after a backoff."
   [error]
-  (contains? retryable-types (:type (ex-data error))))
+  (contains? fast-retryable-types (:type (ex-data error))))
+
+(defn eventually-retryable?
+  "True when an identical request can still succeed later. Gates the slow
+  cycle, not the burst."
+  [error]
+  (contains? eventually-retryable-types (:type (ex-data error))))
 
 (def default-retry-config
   "Default configuration for the retry mechanism on idempotent requests."
@@ -60,7 +70,7 @@
      (->> (observable-fn)
           (rx/catch
            (fn [cause]
-             (if (and (retryable-error? cause)
+             (if (and (fast-retryable? cause)
                       (< attempt max-retries))
                ;; bit-shift-left 1 N is equivalent to 2^N: shift the bits of the
                ;; number 1 to the left N positions (e.g. 1 -> 2 -> 4 -> 8 -> 16),

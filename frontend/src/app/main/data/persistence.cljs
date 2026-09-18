@@ -22,14 +22,30 @@
    [potok.v2.core :as ptk]))
 
 (declare ^:private run-persistence-task)
+(declare ^:private resume-persistence)
 
 (log/set-level! :warn)
 
 (def revn-data (atom {}))
+
+;; Request ids of the sends in flight, written outside the store's event loop.
 (defonce ^:private active-requests (atom #{}))
 (def queue-conj (fnil conj #queue []))
 
 (def force-persist? #(= % ::force-persist))
+
+(def save-retry-config
+  "Retry policy for the quick burst that follows a transport failure."
+  {:max-retries 3
+   :base-delay-ms 1000})
+
+(def recovery-retry-config
+  "Retry policy for a queue known to be failing: the cycle does the waiting."
+  {:max-retries 0})
+
+(def slow-retry-delay-ms
+  "Pause between the attempts of a queue whose quick burst is spent."
+  30000)
 
 (def ^:private saving-stall-timeout-ms (* 5 60 1000))
 (def ^:private saving-check-interval-ms 30000)
@@ -190,39 +206,132 @@
       ptk/WatchEvent
       (watch [_ state _]
         (let [pstate (:persistence state)]
-          (when (and (not= :error (:status pstate))
-                     (= run-id (:run-id pstate)))
+          (cond
+            ;; A new edit restarts a stopped queue from its head. Sending a
+            ;; commit again cannot duplicate it.
+            (= :error (:status pstate))
+            (rx/of (resume-persistence true))
+
+            (= run-id (:run-id pstate))
             (rx/of (update-status :saving)
                    (run-persistence-task))))))))
 
-(defn- persistence-failed
-  [commit-id cause]
-  (ptk/reify ::persistence-failed
+(defn- failure-action
+  "What to do about a save that failed.
+
+  :retry     warn and keep trying at a slower pace
+  :warn      warn and let a later edit try again
+  :resync    drop the unappliable edits and load the file as it stands
+  :delegate  hand the cause to the general error handler"
+  [cause]
+  (let [{:keys [type code]} (ex-data cause)]
+    (cond
+      (contains? #{:vern-conflict :revn-conflict} code)      :resync
+      (contains? #{:authentication :not-found :restriction} type) :delegate
+      (rp/eventually-retryable? cause)                       :retry
+      :else                                                  :warn)))
+
+(defn- discard-queue
+  "Drops every queued edit. Only for edits that can never be applied."
+  []
+  (ptk/reify ::discard-queue
     ptk/UpdateEvent
     (update [_ state]
-      (let [data (ex-data cause)]
-        (update state :persistence
-                (fn [pstate]
-                  (-> pstate
-                      (assoc :status :error
-                             :error (assoc data
-                                           :type :persistence
-                                           :code (:code data :save-failed)
-                                           :cause-type (:type data)
-                                           :commit-id commit-id
-                                           :hint (ex-message cause)
-                                           ::errors/handled? true))
-                      (dissoc :run-id :last-progress-at :stall-reported?))))))
+      (assoc state :persistence {:queue #queue [] :index {} :status :saved}))))
 
-    ptk/WatchEvent
-    (watch [_ _ _]
-      (rx/of (ptk/data-event ::error cause)))
+(defn- slow-retry-cycle
+  "Attempts a halted queue at a slow pace until the queue resumes,
+  persistence restarts, or the workspace closes."
+  [stream]
+  (let [stoper-s (rx/merge
+                  (rx/filter (ptk/type? ::resume-persistence) stream)
+                  (rx/filter (ptk/type? ::initialize-persistence) stream)
+                  (rx/filter (ptk/type? ::dw/finalize-workspace) stream))]
+    (->> (rx/timer slow-retry-delay-ms)
+         (rx/map (fn [_]
+                   (log/wrn :hint "retrying halted save"
+                            :delay slow-retry-delay-ms)
+                   (resume-persistence true)))
+         (rx/take-until stoper-s))))
 
-    ptk/EffectEvent
-    (effect [_ _ _]
-      ;; Report without invoking global handlers that may reload the file or
-      ;; navigate away before the user can recover the retained changes.
-      (errors/flash-persistence cause))))
+(defn- stale-failure?
+  "True when a send failed for a commit another attempt has since saved, so
+  there is nothing left to report. A failure the runner raises is never
+  stale: there a missing commit is the fault being reported."
+  [state commit-id from-send?]
+  (and from-send?
+       (let [commit (dm/get-in state [:persistence :index commit-id])]
+         (or (nil? commit)
+             (::acknowledged? commit)))))
+
+(defn- persistence-failed
+  ([commit-id cause]
+   (persistence-failed commit-id cause false))
+  ([commit-id cause from-send?]
+   (ptk/reify ::persistence-failed
+     ptk/UpdateEvent
+     (update [_ state]
+       (let [data (ex-data cause)]
+         (if (stale-failure? state commit-id from-send?)
+           state
+           (update state :persistence
+                   (fn [pstate]
+                     (let [code (:code data :save-failed)]
+                       (-> pstate
+                           (assoc :status :error
+                                  :error (assoc data
+                                                :type :persistence
+                                                :code code
+                                                :cause-type (:type data)
+                                                :commit-id commit-id
+                                                :hint (ex-message cause)
+                                                ::errors/handled? true))
+                           (dissoc :run-id :last-progress-at :stall-reported?))))))))
+
+     ptk/WatchEvent
+     (watch [_ state stream]
+       (let [action (when-not (stale-failure? state commit-id from-send?)
+                      (failure-action cause))]
+         (log/wrn :hint "save failed"
+                  :commit-id (dm/str commit-id)
+                  :code (:code (ex-data cause) :save-failed)
+                  :cause-type (:type (ex-data cause))
+                  :action action)
+         (case action
+           nil (rx/empty)
+
+           ;; The queued edits belong to a version the file does not carry.
+           ;; Dropping them keeps the next edit from resending them.
+           :resync
+           (rx/of (ptk/data-event ::error cause)
+                  (discard-queue)
+                  (ptk/event ::dw/reload-current-file))
+
+           ;; The general handler reports it and decides what the user sees.
+           :delegate
+           (rx/of (ptk/data-event ::error cause))
+
+           (rx/merge
+            (rx/of (ptk/data-event ::error cause))
+            (if (= :retry action)
+              (slow-retry-cycle stream)
+              (rx/empty))))))
+
+     ptk/EffectEvent
+     (effect [_ state _]
+       (case (when-not (stale-failure? state commit-id from-send?)
+               (failure-action cause))
+         ;; Warn without the global handlers, which may reload or navigate
+         ;; away while the retained changes are still recoverable.
+         (:retry :warn)
+         (errors/flash-persistence cause)
+
+         ;; Nothing can be saved from here: the general handler chooses what
+         ;; the user sees and reports it.
+         :delegate
+         (errors/on-error cause)
+
+         nil)))))
 
 (defn- commit-persisted
   [commit]
@@ -233,43 +342,56 @@
     ptk/UpdateEvent
     (update [_ state]
       ;; Keep the acknowledgment even if the queue runner has stopped.
-      (d/update-in-when state [:persistence :index (:id commit)]
-                        assoc ::acknowledged? true))))
+      (-> state
+          (d/update-in-when [:persistence :index (:id commit)]
+                            assoc ::acknowledged? true)
+          (update :persistence dissoc ::recovering?)))))
 
 (defn- update-file-request
-  "Issues the `update-file` request, tracked as active for its lifetime."
-  [request-id params]
+  "Issues the `update-file` request, tracked as active for its whole life,
+  retries included, so a save waiting out a backoff counts as in flight."
+  [request-id retry-config params]
   (rx/create
    (fn [subscriber]
      (swap! active-requests conj request-id)
-     (let [source       (try
-                          (rp/cmd! :update-file params)
-                          (catch :default cause
-                            (rx/throw cause)))
+     (let [source       (rp/with-retry
+                          #(try
+                             (rp/cmd! :update-file params)
+                             (catch :default cause
+                               (rx/throw cause)))
+                          retry-config)
            subscription (.subscribe source subscriber)]
        (fn []
          (swap! active-requests disj request-id)
          (rx/dispose! subscription))))))
 
+(defn- attempt-retry-config
+  "The burst for a save that fails out of the blue; one attempt for a queue
+  already known to be failing."
+  [state]
+  (if (dm/get-in state [:persistence ::recovering?])
+    recovery-retry-config
+    save-retry-config))
+
 (defn- attempt-state
   "Classifies what should happen with a queued commit before sending it.
   The attempt stamp and the send decision both read this, so a commit is
   only ever stamped with a request that is actually going to be sent."
-  [state commit-id request-id]
+  [state commit-id]
   (let [commit (dm/get-in state [:persistence :index commit-id])]
     (cond
       (= :error (dm/get-in state [:persistence :status]))  :halted
       (nil? commit)                                        :missing-commit
       (::acknowledged? commit)                             :acknowledged
       (contains? @active-requests (::request-id commit))   :in-flight
-      (and (::request-id commit)
-           (not= request-id (::request-id commit)))        :unknown-outcome
       (not (dm/get-in state [:permissions :can-edit]))     :permission-denied
       :else                                                :ready)))
 
 (defn- send-queued-commit
   "Sends one queued commit and maps its outcome to persistence events."
-  [request-id session-id {:keys [id file-id file-revn file-vern changes features] :as commit}]
+  [request-id session-id retry-config
+   {:keys [id file-id file-revn file-vern changes features] :as commit}]
+  (log/dbg :hint "sending save" :commit-id (dm/str id) :file-id (dm/str file-id))
   (let [params {:id file-id
                 :revn (max file-revn (get @revn-data file-id 0))
                 :vern file-vern
@@ -280,7 +402,7 @@
                 :changes (vec changes)
                 :features features}]
     ;; UI read-only mode does not invalidate already queued edits.
-    (->> (update-file-request request-id params)
+    (->> (update-file-request request-id retry-config params)
          (rx/take 1)
          ;; A response that carries no revision, including one that never
          ;; arrived, is treated as a failed save rather than a saved file.
@@ -294,7 +416,7 @@
                                             :code :invalid-save-response
                                             :file-id file-id})))))
          (rx/catch (fn [cause]
-                     (rx/of (persistence-failed id cause)))))))
+                     (rx/of (persistence-failed id cause true)))))))
 
 (defn- persist-commit
   [commit-id]
@@ -302,9 +424,9 @@
     (ptk/reify ::persist-commit
       ptk/UpdateEvent
       (update [_ state]
-        (if (= :ready (attempt-state state commit-id request-id))
-          ;; Record the attempt before starting I/O. An interrupted request
-          ;; may have reached the server and must not be replayed blindly.
+        (if (= :ready (attempt-state state commit-id))
+          ;; Stamp the attempt before any I/O, so a request in flight is
+          ;; never sent twice in parallel.
           (assoc-in state [:persistence :index commit-id ::request-id] request-id)
           state))
 
@@ -317,17 +439,17 @@
                                                                  :code code
                                                                  :commit-id commit-id
                                                                  :file-id (:file-id commit)}))))]
-          (case (attempt-state state commit-id request-id)
+          (case (attempt-state state commit-id)
             :halted            (rx/empty)
             :missing-commit    (fail :missing-commit "A queued save has no change data")
             :acknowledged      (rx/of (commit-persisted commit))
             ;; The replacement runner listens for the original request's result.
             :in-flight         (rx/empty)
-            ;; Even :network and :offline do not prove that the server
-            ;; skipped the write. Keep the attempt stamp to prevent replay.
-            :unknown-outcome   (fail :save-outcome-unknown "An interrupted save has an unknown outcome")
             :permission-denied (fail :save-permission-denied "Edit permission was lost before changes could be saved")
-            :ready             (send-queued-commit request-id (:session-id state) commit)))))))
+            :ready             (send-queued-commit request-id
+                                                   (:session-id state)
+                                                   (attempt-retry-config state)
+                                                   commit)))))))
 
 
 (defn- run-persistence-task
@@ -363,19 +485,24 @@
           (rx/of (update-status :saved)))))))
 
 (defn- resume-persistence
-  []
-  (ptk/reify ::resume-persistence
-    ptk/UpdateEvent
-    (update [_ state]
-      (update state :persistence
-              (fn [pstate]
-                (-> pstate
-                    (dissoc :error)
-                    (assoc :run-id (uuid/next) :status :saving)
-                    (update :last-progress-at d/nilv (inst-ms (ct/now)))))))
-    ptk/WatchEvent
-    (watch [_ _ _]
-      (rx/of (run-persistence-task)))))
+  "Starts the queue again. `recovering?` marks a queue known to be failing,
+  which sends once per cycle instead of bursting."
+  ([] (resume-persistence false))
+  ([recovering?]
+   (ptk/reify ::resume-persistence
+     ptk/UpdateEvent
+     (update [_ state]
+       (update state :persistence
+               (fn [pstate]
+                 (-> pstate
+                     (dissoc :error)
+                     (assoc :run-id (uuid/next)
+                            :status :saving
+                            ::recovering? recovering?)
+                     (update :last-progress-at d/nilv (inst-ms (ct/now)))))))
+     ptk/WatchEvent
+     (watch [_ _ _]
+       (rx/of (run-persistence-task))))))
 
 (defn- recover-persistence
   []
@@ -388,7 +515,6 @@
           (and (seq queue)
                (or (not= status :error)
                    (and (= :save-permission-denied (:code error))
-                        (not (::request-id commit))
                         (= (:file-id commit) (:current-file-id state))
                         (dm/get-in state [:permissions :can-edit]))))
           (rx/of (resume-persistence))
