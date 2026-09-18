@@ -2694,3 +2694,265 @@
         (t/is (th/ex-info? err))
         (t/is (= :not-found (:type edata)))
         (t/is (= :object-not-found (:code edata)))))))
+
+(t/deftest update-file-applies-a-repeated-commit-only-once
+  (let [profile (th/create-profile* 1 {:is-active true})
+        file    (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+
+        commit-id (uuid/random)
+
+        params  {::th/type :update-file
+                 ::rpc/profile-id (:id profile)
+                 :id (:id file)
+                 :session-id (uuid/random)
+                 :revn 0
+                 :vern 0
+                 :commit-id commit-id
+                 :features cfeat/supported-features
+                 :changes [{:type :add-page
+                            :name "page to add once"
+                            :id (uuid/random)}]}
+
+        ;; The client never learns the outcome of the first call and sends
+        ;; the same commit again.
+        out1    (th/command! params)
+        out2    (th/command! params)]
+
+    (t/is (nil? (:error out1)))
+    (t/is (nil? (:error out2)))
+
+    (t/testing "the page is added once"
+      (let [out (th/command! {::th/type :get-file
+                              ::rpc/profile-id (:id profile)
+                              :id (:id file)})]
+        (t/is (nil? (:error out)))
+        (t/is (= 2 (count (get-in out [:result :data :pages]))))))
+
+    (t/testing "the file advances a single revision"
+      (let [row (th/db-get :file {:id (:id file)})]
+        (t/is (= 1 (:revn row)))))
+
+    (t/testing "the repeated call answers exactly what the first one did"
+      (t/is (= (:revn (:result out1))
+               (:revn (:result out2)))))
+
+    (t/testing "the repeated call skips the lagged changes nobody reads"
+      (t/is (not (contains? (:result out2) :lagged))))
+
+    (t/testing "a replay is audited like the call it repeats"
+      (let [props1 (-> out1 :result meta :app.loggers.audit/replace-props)
+            props2 (-> out2 :result meta :app.loggers.audit/replace-props)]
+        (t/is (= (set (keys props1)) (set (keys props2))))
+        (t/is (= (:id props1) (:id props2)))
+        (t/is (= (:team-id props1) (:team-id props2)))))))
+
+(defn- save-params
+  "Params for one update-file call, adding a page. A nil commit-id is what a
+  client that knows nothing about commit ids sends.
+
+  Call this once and reuse the result to repeat a save: a retry carries the
+  same changes, page id included, as the call it repeats."
+  [profile file commit-id page-name]
+  (cond-> {::th/type :update-file
+           ::rpc/profile-id (:id profile)
+           :id (:id file)
+           :session-id (uuid/random)
+           :revn 0
+           :vern 0
+           :features cfeat/supported-features
+           :changes [{:type :add-page
+                      :name page-name
+                      :id (uuid/random)}]}
+    (some? commit-id)
+    (assoc :commit-id commit-id)))
+
+(defn- count-pages
+  [profile file]
+  (let [out (th/command! {::th/type :get-file
+                          ::rpc/profile-id (:id profile)
+                          :id (:id file)})]
+    (t/is (nil? (:error out)))
+    (count (get-in out [:result :data :pages]))))
+
+(defn- file-revn
+  "How many times changes were applied to a file. Repeating a save carries
+  the same page id, so the pages look the same whether the changes were
+  applied once or twice; the revision is what tells them apart."
+  [file]
+  (:revn (th/db-get :file {:id (:id file)})))
+
+(defn- get-commit-record
+  "Reads a file_commit row. Every such row carries a deleted-at marking when
+  it expires, so the usual deleted-row filter would hide all of them."
+  [file-id commit-id]
+  (th/db-get :file-commit
+             {:file-id file-id :commit-id commit-id}
+             {::db/remove-deleted false}))
+
+(t/deftest objects-gc-drains-expired-commit-records
+  (let [profile (th/create-profile* 1 {:is-active true})
+        file    (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+
+        commit-id (uuid/random)
+
+        out     (th/command! {::th/type :update-file
+                              ::rpc/profile-id (:id profile)
+                              :id (:id file)
+                              :session-id (uuid/random)
+                              :revn 0
+                              :vern 0
+                              :commit-id commit-id
+                              :features cfeat/supported-features
+                              :changes [{:type :add-page
+                                         :name "page"
+                                         :id (uuid/random)}]})]
+
+    (t/is (nil? (:error out)))
+
+    (t/testing "a record a client could still be retrying against survives"
+      (th/run-task! :objects-gc {})
+      (t/is (some? (get-commit-record (:id file) commit-id))))
+
+    (t/testing "a record past its retention is drained"
+      (th/db-update! :file-commit
+                     {:deleted-at (ct/minus (ct/now) (ct/duration {:hours 1}))}
+                     {:file-id (:id file) :commit-id commit-id})
+      (th/run-task! :objects-gc {})
+      (t/is (nil? (get-commit-record (:id file) commit-id))))))
+
+(t/deftest a-commit-record-never-holds-a-file-back
+  ;; A restricting foreign key here would stop a file from being removed at
+  ;; all, the way file_change and file_data do.
+  (let [row (th/db-exec-one!
+             ["select confdeltype
+                 from pg_constraint
+                where conrelid = 'file_commit'::regclass
+                  and confrelid = 'file'::regclass"])]
+    (t/is (= "c" (str (:confdeltype row)))
+          "the foreign key to file cascades")))
+
+(t/deftest update-file-refuses-a-repeated-commit-after-a-version-restore
+  (let [profile (th/create-profile* 1 {:is-active true})
+        file    (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+
+        commit-id (uuid/random)
+
+        params  {::th/type :update-file
+                 ::rpc/profile-id (:id profile)
+                 :id (:id file)
+                 :session-id (uuid/random)
+                 :revn 0
+                 :vern 0
+                 :commit-id commit-id
+                 :features cfeat/supported-features
+                 :changes [{:type :add-page
+                            :name "page to add once"
+                            :id (uuid/random)}]}
+
+        out1    (th/command! params)]
+
+    (t/is (nil? (:error out1)))
+
+    ;; Restoring a version assigns the file a fresh vern and rolls its data
+    ;; back, so the effect of the commit is gone even though its id remains.
+    (th/db-update! :file {:vern 7} {:id (:id file)})
+
+    (let [out2  (th/command! params)
+          edata (-> out2 :error ex-data)]
+      (t/testing "a version conflict is raised"
+        (t/is (some? (:error out2)))
+        (t/is (= :validation (:type edata)))
+        (t/is (= :vern-conflict (:code edata)))))))
+
+(t/deftest a-save-without-a-commit-id-is-never-deduplicated
+  (let [profile (th/create-profile* 1 {:is-active true})
+        file    (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+
+        params  (save-params profile file nil "page")
+
+        out1    (th/command! params)
+        out2    (th/command! params)]
+
+    (t/is (nil? (:error out1)))
+    (t/is (nil? (:error out2)))
+
+    ;; The dedup must not reach a client that sends no commit id.
+    (t/testing "both calls apply"
+      (t/is (= 2 (file-revn file))))))
+
+(t/deftest two-commits-carrying-the-same-changes-both-apply
+  (let [profile (th/create-profile* 1 {:is-active true})
+        file    (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+
+        params  (save-params profile file (uuid/random) "page")
+
+        out1    (th/command! params)
+        out2    (th/command! (assoc params :commit-id (uuid/random)))]
+
+    (t/is (nil? (:error out1)))
+    (t/is (nil? (:error out2)))
+
+    ;; The dedup keys on the commit id, not on what the changes look like.
+    (t/testing "both calls apply"
+      (t/is (= 2 (file-revn file))))))
+
+(t/deftest one-commit-id-used-against-two-files-applies-to-both
+  (let [profile (th/create-profile* 1 {:is-active true})
+        file1   (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+        file2   (th/create-file* 2 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+
+        commit-id (uuid/random)
+
+        out1    (th/command! (save-params profile file1 commit-id "page"))
+        out2    (th/command! (save-params profile file2 commit-id "page"))]
+
+    (t/is (nil? (:error out1)))
+    (t/is (nil? (:error out2)))
+
+    ;; A commit id is only ever unique within one file.
+    (t/testing "neither file is deduplicated against the other"
+      (t/is (= 2 (count-pages profile file1)))
+      (t/is (= 2 (count-pages profile file2))))))
+
+(t/deftest concurrent-repeats-of-one-commit-apply-once
+  (let [profile (th/create-profile* 1 {:is-active true})
+        file    (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+
+        params  (save-params profile file (uuid/random) "page")
+
+        ;; A client that retries before the first answer arrives has two
+        ;; identical requests in flight at once. The file advisory lock is
+        ;; what serialises them, so the second one finds the record. The latch
+        ;; holds both threads until they can start together.
+        start   (java.util.concurrent.CountDownLatch. 1)
+        pending (doall [(future (.await start) (th/command! params))
+                        (future (.await start) (th/command! params))])
+        _       (.countDown start)
+        outs    (mapv #(deref % 30000 ::timeout) pending)]
+
+    (t/is (not-any? #{::timeout} outs) "both requests finished")
+    (t/is (every? (comp nil? :error) outs))
+
+    (t/testing "the changes are applied once"
+      (t/is (= 2 (count-pages profile file)))
+      (t/is (= 1 (file-revn file))))
+
+    (t/testing "both callers get the same answer"
+      (t/is (= 0 (:revn (:result (first outs)))))
+      (t/is (= 0 (:revn (:result (second outs))))))))

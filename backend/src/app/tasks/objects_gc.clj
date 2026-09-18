@@ -336,6 +336,32 @@
                    (+ total affected)))
                0)))
 
+(def ^:private sql:get-file-commit
+  "SELECT file_id, commit_id, deleted_at
+     FROM file_commit
+    WHERE deleted_at IS NOT NULL
+      AND deleted_at <= ?
+    ORDER BY deleted_at ASC
+    LIMIT ?
+      FOR UPDATE
+     SKIP LOCKED")
+
+(defn- delete-file-commits!
+  [{:keys [::db/conn ::timestamp ::chunk-size] :as cfg}]
+  (->> (db/plan conn [sql:get-file-commit timestamp chunk-size] {:fetch-size 5})
+       (reduce (fn [total {:keys [file-id commit-id deleted-at]}]
+                 (l/trc :obj "file-commit"
+                        :file-id (str file-id)
+                        :commit-id (str commit-id)
+                        :deleted-at (ct/format-inst deleted-at))
+
+                 (let [affected (-> (db/delete! conn :file-commit
+                                                {:file-id file-id
+                                                 :commit-id commit-id})
+                                    (db/get-update-count))]
+                   (+ total affected)))
+               0)))
+
 (def ^:private deletion-proc-vars
   ;; NOTE: upload sessions go first: deleting a profile cascades to its
   ;; sessions, which would hit the upload_session_chunk NO ACTION foreign key
@@ -347,6 +373,7 @@
    #'delete-file-thumbnails!
    #'delete-file-data!
    #'delete-file-changes!
+   #'delete-file-commits!
    #'delete-files!
    #'delete-projects!
    #'delete-fonts!

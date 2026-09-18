@@ -40,12 +40,17 @@
    [clojure.set :as set]))
 
 (declare ^:private get-lagged-changes)
+(declare ^:private get-repeated-commit-result)
 (declare ^:private send-notifications!)
 (declare ^:private update-file)
 (declare ^:private update-file*)
 (declare ^:private process-changes-and-validate)
 (declare ^:private take-snapshot?)
 (declare ^:private invalidate-caches!)
+
+(def ^:private commit-dedup-retention
+  "How long a commit id is remembered, bounding how long a client may retry."
+  (ct/duration {:days 7}))
 
 ;; PUBLIC API; intended to be used outside of this module
 (declare update-file!)
@@ -62,6 +67,7 @@
    [:session-id ::sm/uuid]
    [:revn {:min 0} ::sm/int]
    [:vern {:min 0} ::sm/int]
+   [:commit-id {:optional true} ::sm/uuid]
    [:features {:optional true} ::cfeat/features]
    [:changes {:optional true} [:vector cpc/schema:change]]
    [:changes-with-metadata {:optional true}
@@ -149,70 +155,74 @@
   (files/check-edition-permissions! conn profile-id id)
   (db/xact-lock! conn id)
 
-  (let [file     (get-file cfg id)
-        team     (teams/get-team conn
-                                 :profile-id profile-id
-                                 :team-id (:team-id file))
+  ;; A save whose answer never reached the client is sent again with the
+  ;; same commit id; it must not be applied twice.
+  (if-let [result (get-repeated-commit-result conn params)]
+    result
+    (let [file     (get-file cfg id)
+          team     (teams/get-team conn
+                                   :profile-id profile-id
+                                   :team-id (:team-id file))
 
-        features (-> (cfeat/get-team-enabled-features cf/flags team)
-                     (cfeat/check-client-features! (:features params))
-                     (cfeat/check-file-features! (:features file)))
+          features (-> (cfeat/get-team-enabled-features cf/flags team)
+                       (cfeat/check-client-features! (:features params))
+                       (cfeat/check-file-features! (:features file)))
 
-        changes  (if changes-with-metadata
-                   (->> changes-with-metadata (mapcat :changes) vec)
-                   (vec changes))
+          changes  (if changes-with-metadata
+                     (->> changes-with-metadata (mapcat :changes) vec)
+                     (vec changes))
 
-        params   (-> params
-                     (assoc :profile-id profile-id)
-                     (assoc :features (set/difference features cfeat/frontend-only-features))
-                     (assoc :team team)
-                     (assoc :file file)
-                     (assoc :changes changes))
+          params   (-> params
+                       (assoc :profile-id profile-id)
+                       (assoc :features (set/difference features cfeat/frontend-only-features))
+                       (assoc :team team)
+                       (assoc :file file)
+                       (assoc :changes changes))
 
-        cfg      (assoc cfg ::timestamp (ct/now))
+          cfg      (assoc cfg ::timestamp (ct/now))
 
-        tpoint   (ct/tpoint)]
+          tpoint   (ct/tpoint)]
 
-    (when (not= (:vern params)
-                (:vern file))
-      (ex/raise :type :validation
-                :code :vern-conflict
-                :hint "A different version has been restored for the file."
-                :context {:incoming-revn (:revn params)
-                          :stored-revn (:revn file)}))
+      (when (not= (:vern params)
+                  (:vern file))
+        (ex/raise :type :validation
+                  :code :vern-conflict
+                  :hint "A different version has been restored for the file."
+                  :context {:incoming-revn (:revn params)
+                            :stored-revn (:revn file)}))
 
-    (when (> (:revn params)
-             (:revn file))
-      (ex/raise :type :validation
-                :code :revn-conflict
-                :hint "The incoming revision number is greater that stored version."
-                :context {:incoming-revn (:revn params)
-                          :stored-revn (:revn file)}))
+      (when (> (:revn params)
+               (:revn file))
+        (ex/raise :type :validation
+                  :code :revn-conflict
+                  :hint "The incoming revision number is greater that stored version."
+                  :context {:incoming-revn (:revn params)
+                            :stored-revn (:revn file)}))
 
-    ;; When newly computed features does not match exactly with the
-    ;; features defined on team row, we update it
-    (when-let [features (-> features
-                            (set/difference (:features team))
-                            (set/difference cfeat/no-team-inheritable-features)
-                            (not-empty))]
-      (let [features (-> features
-                         (set/union (:features team))
-                         (set/difference cfeat/no-team-inheritable-features)
-                         (into-array))]
-        (db/update! conn :team
-                    {:features features}
-                    {:id (:id team)}
-                    {::db/return-keys false})))
+      ;; When newly computed features does not match exactly with the
+      ;; features defined on team row, we update it
+      (when-let [features (-> features
+                              (set/difference (:features team))
+                              (set/difference cfeat/no-team-inheritable-features)
+                              (not-empty))]
+        (let [features (-> features
+                           (set/union (:features team))
+                           (set/difference cfeat/no-team-inheritable-features)
+                           (into-array))]
+          (db/update! conn :team
+                      {:features features}
+                      {:id (:id team)}
+                      {::db/return-keys false})))
 
 
-    (mtx/run! metrics {:id :update-file-changes :inc (count changes)})
+      (mtx/run! metrics {:id :update-file-changes :inc (count changes)})
 
-    (binding [l/*context* (some-> (meta params)
-                                  (get :app.http/request)
-                                  (errors/request->context))]
-      (-> (update-file* cfg params)
-          (rph/with-defer #(let [elapsed (tpoint)]
-                             (l/trace :hint "update-file" :time (ct/format-duration elapsed))))))))
+      (binding [l/*context* (some-> (meta params)
+                                    (get :app.http/request)
+                                    (errors/request->context))]
+        (-> (update-file* cfg params)
+            (rph/with-defer #(let [elapsed (tpoint)]
+                               (l/trace :hint "update-file" :time (ct/format-duration elapsed)))))))))
 
 (defn- update-file*
   "Internal function, part of the update-file process, that encapsulates
@@ -223,7 +233,7 @@
 
   Only intended for internal use on this module."
   [{:keys [::db/conn ::timestamp] :as cfg}
-   {:keys [profile-id file team features changes session-id skip-validate] :as params}]
+   {:keys [profile-id file team features changes session-id commit-id skip-validate] :as params}]
 
   (binding [pmap/*tracked* (pmap/create-tracked)
             pmap/*load-fn* (partial fdata/load-pointer cfg (:id file))]
@@ -260,6 +270,17 @@
 
       ;; Insert change (xlog) with deleted_at in a future data for
       ;; make them automatically eleggible for GC once they expires
+      ;; Record the commit id, kept apart from the xlog because it has to
+      ;; outlive it by far.
+      (when (some? commit-id)
+        (db/insert! conn :file-commit
+                    {:file-id (:id file)
+                     :commit-id commit-id
+                     :revn revn
+                     :created-at timestamp
+                     :deleted-at (ct/plus timestamp commit-dedup-retention)}
+                    {::db/return-keys false}))
+
       (db/insert! conn :file-change
                   {:id (uuid/next)
                    :session-id session-id
@@ -459,6 +480,44 @@
        (filter :changes)
        (mapv (fn [row]
                (update row :changes blob/decode)))))
+
+(def ^:private sql:applied-commit
+  "select fcm.revn,
+          f.vern,
+          f.name,
+          f.features,
+          f.project_id,
+          p.team_id
+     from file_commit as fcm
+    inner join file as f on (f.id = fcm.file_id)
+    inner join project as p on (p.id = f.project_id)
+    where fcm.file_id = ?
+      and fcm.commit_id = ?")
+
+(defn- get-repeated-commit-result
+  "Answers a save this server already applied, under the same commit id,
+  without applying its changes again.
+
+  Raises a version conflict when the file has been rolled back since: the
+  record outlives the change it made, and answering would make the client
+  discard an edit the file does not carry."
+  [conn {:keys [id commit-id vern]}]
+  (when-let [row (and (some? commit-id)
+                      (db/exec-one! conn [sql:applied-commit id commit-id]))]
+    (when (not= vern (:vern row))
+      (ex/raise :type :validation
+                :code :vern-conflict
+                :hint "A different version has been restored for the file."
+                :context {:incoming-vern vern
+                          :stored-vern (:vern row)}))
+
+    (with-meta {:revn (:revn row)}
+      {::audit/replace-props
+       {:id         id
+        :name       (:name row)
+        :features   (db/decode-pgarray (:features row) #{})
+        :project-id (:project-id row)
+        :team-id    (:team-id row)}})))
 
 (defn- send-notifications!
   [cfg {:keys [team changes session-id] :as params} file]
