@@ -49,6 +49,11 @@
   "Pause between the attempts of a queue whose quick burst is spent."
   30000)
 
+(def retry-give-up-ms
+  "How long a failing queue keeps trying. Matches how long the backend
+  remembers a commit id."
+  (* 24 60 60 1000))
+
 (def ^:private sustained-failure-threshold-ms
   "How long a queue keeps failing before it counts as an outage."
   (* 5 60 1000))
@@ -128,6 +133,15 @@
   (let [{:keys [queue index]} (:persistence state)]
     (or (:file-id (get index (peek queue)))
         (:current-file-id state))))
+
+(defn- retry-window-open?
+  "True while a failing queue may still be sent again. Past this the backend
+  has forgotten the commit id, so sending it once more could apply the same
+  changes twice."
+  [pstate]
+  (let [since (:failing-since pstate)]
+    (or (nil? since)
+        (< (- (inst-ms (ct/now)) since) retry-give-up-ms))))
 
 (defn- submit-persistence-report
   [hint data]
@@ -221,10 +235,12 @@
       (watch [_ state _]
         (let [pstate (:persistence state)]
           (cond
-            ;; A new edit restarts a stopped queue from its head. Sending a
-            ;; commit again cannot duplicate it.
+            ;; A new edit restarts a stopped queue from its head, while the
+            ;; backend still recognizes the head's commit id and so cannot
+            ;; apply it twice.
             (= :error (:status pstate))
-            (rx/of (resume-persistence true))
+            (when (retry-window-open? pstate)
+              (rx/of (resume-persistence true)))
 
             (= run-id (:run-id pstate))
             (rx/of (update-status :saving)
@@ -347,7 +363,8 @@
            (rx/merge
             (rx/of (ptk/data-event ::error cause))
             (sustained-failure-report state)
-            (if (= :retry action)
+            (if (and (= :retry action)
+                     (retry-window-open? (:persistence state)))
               (slow-retry-cycle stream)
               (rx/empty))))))
 
@@ -593,12 +610,13 @@
   (ptk/reify ::recover-persistence
     ptk/WatchEvent
     (watch [_ state _]
-      (let [{:keys [queue index status error run-id]} (:persistence state)
+      (let [{:keys [queue index status error run-id] :as pstate} (:persistence state)
             commit (get index (peek queue))]
         (cond
           (and (seq queue)
                (or (not= status :error)
                    (and (= :save-permission-denied (:code error))
+                        (retry-window-open? pstate)
                         (= (:file-id commit) (:current-file-id state))
                         (dm/get-in state [:permissions :can-edit]))))
           (rx/of (resume-persistence))

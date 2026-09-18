@@ -828,6 +828,63 @@
               (t/is (empty? @reports)
                     "a blip is covered by the warning the user already saw"))))))))
 
+
+;; ---------------------------------------------------------------------------
+;; giving up when the backend can no longer vouch for the commit
+;; ---------------------------------------------------------------------------
+
+(def ^:private past-window-ms (+ dps/retry-give-up-ms 1000))
+
+(t/deftest a-queue-failing-past-the-retry-window-stops-trying
+  (with-timers
+    (fn [{:keys [armed? fire!]}]
+      (with-reports
+        (fn [{:keys [clock]}]
+          (with-failing-saves
+            1000
+            {:retry-config no-retry-config}
+            (fn [{:keys [calls store file-id]}]
+              (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+              (t/is (= 1 @calls))
+              (t/is (armed? dps/slow-retry-delay-ms) "a fresh failure keeps trying")
+
+              (reset! clock (quot dps/retry-give-up-ms 2))
+              (fire! dps/slow-retry-delay-ms)
+              (t/is (= 2 @calls) "and is still trying halfway through the window")
+              (t/is (armed? dps/slow-retry-delay-ms))
+
+              (reset! clock past-window-ms)
+              (fire! dps/slow-retry-delay-ms)
+              (t/is (= 3 @calls) "the attempt that runs out of the window")
+              (t/is (not (armed? dps/slow-retry-delay-ms))
+                    "is the last: sending it again could apply it twice")
+
+              (t/is (= :error (get-in @store [:persistence :status])))
+              (t/is (= 1 (count (get-in @store [:persistence :queue])))
+                    "the edits are kept rather than dropped"))))))))
+
+(t/deftest an-edit-past-the-retry-window-does-not-send-the-queue-again
+  (with-timers
+    (fn [_]
+      (with-reports
+        (fn [{:keys [clock]}]
+          (with-failing-saves
+            1000
+            {:retry-config no-retry-config}
+            (fn [{:keys [calls store file-id]}]
+              (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+              (t/is (= 1 @calls))
+
+              (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+              (t/is (= 2 @calls) "inside the window an edit sends the head again")
+
+              (reset! clock past-window-ms)
+              (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+              (t/is (= 2 @calls) "past it an edit sends nothing")
+              (t/is (= :error (get-in @store [:persistence :status])))
+              (t/is (= 3 (count (get-in @store [:persistence :queue])))
+                    "and the edits pile up in the queue instead"))))))))
+
 (defn- queued-state
   "A store state holding one commit, queued and being saved."
   []

@@ -5,9 +5,11 @@
 --- presence means the changes are applied: a request repeating that commit id
 --- is answered with the revision the first call returned.
 ---
---- The record lives apart from file_change because it must outlive any retry a
---- client may still be making, and costs a few dozen bytes per save against the
---- xlog's encoded payload.
+--- The record lives apart from file_change because the two are kept for
+--- different reasons: the xlog holds changes for as long as a client may need
+--- to catch up, this holds a commit id for as long as a client may retry. Both
+--- windows are tuned on their own, and a row here is about 150 bytes including
+--- its indexes, against the xlog's encoded payload.
 ---
 --- The primary key makes a commit id unique per file, so the dedup does not
 --- rest on the caller holding the file advisory lock.

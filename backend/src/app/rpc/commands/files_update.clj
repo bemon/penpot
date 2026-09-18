@@ -49,8 +49,9 @@
 (declare ^:private invalidate-caches!)
 
 (def ^:private commit-dedup-retention
-  "How long a commit id is remembered, bounding how long a client may retry."
-  (ct/duration {:days 7}))
+  "How long a commit id is remembered. A client stops retrying a save at this
+  same age, so a retry never outlives the record that makes it safe to send."
+  (ct/duration {:hours 24}))
 
 ;; PUBLIC API; intended to be used outside of this module
 (declare update-file!)
