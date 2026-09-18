@@ -14,6 +14,7 @@
    [app.main.data.changes :as dch]
    [app.main.data.common :as-alias dc]
    [app.main.data.helpers :as dsh]
+   [app.main.data.notifications :as ntf]
    [app.main.data.workspace :as-alias dw]
    [app.main.errors :as errors]
    [app.main.refs :as refs]
@@ -23,6 +24,7 @@
 
 (declare ^:private run-persistence-task)
 (declare ^:private resume-persistence)
+(declare ^:private report-sustained-failure)
 
 (log/set-level! :warn)
 
@@ -46,6 +48,10 @@
 (def slow-retry-delay-ms
   "Pause between the attempts of a queue whose quick burst is spent."
   30000)
+
+(def ^:private sustained-failure-threshold-ms
+  "How long a queue keeps failing before it counts as an outage."
+  (* 5 60 1000))
 
 (def ^:private saving-stall-timeout-ms (* 5 60 1000))
 (def ^:private saving-check-interval-ms 30000)
@@ -116,6 +122,20 @@
                     (#{:error :saved} status)
                     (dissoc :run-id :last-progress-at :stall-reported?))))))))
 
+(defn- failing-file-id
+  "The file the queue is stuck on, which is not always the one on screen."
+  [state]
+  (let [{:keys [queue index]} (:persistence state)]
+    (or (:file-id (get index (peek queue)))
+        (:current-file-id state))))
+
+(defn- submit-persistence-report
+  [hint data]
+  (let [cause (ex-info hint (assoc data :type :persistence))]
+    (errors/submit-report :event-name "handled-exception"
+                          :hint hint
+                          :report (errors/generate-report cause))))
+
 (defn- report-stalled-persistence
   [now]
   (ptk/reify ::report-stalled-persistence
@@ -125,26 +145,20 @@
 
     ptk/EffectEvent
     (effect [_ state _]
-      (let [{:keys [queue index status run-id last-progress-at]} (:persistence state)
-            commit-id (peek queue)
-            commit    (get index commit-id)
-            hint      "File saving has made no progress for more than five minutes"
-            cause     (ex-info hint
-                               {:type :persistence
-                                :code :saving-stalled
-                                :file-id (or (:file-id commit) (:current-file-id state))
-                                :commit-id commit-id
-                                :run-id run-id
-                                :status status
-                                :queued-commits (count queue)
-                                :elapsed-ms (- now last-progress-at)
-                                :can-edit (dm/get-in state [:permissions :can-edit])
-                                :read-only? (dm/get-in state [:workspace-global :read-only?])
-                                :preview-id (dm/get-in state [:workspace-global :preview-id])
-                                :render-context-lost? (dm/get-in state [:render-state :lost])})]
-        (errors/submit-report :event-name "handled-exception"
-                              :hint hint
-                              :report (errors/generate-report cause))))))
+      (let [{:keys [queue status run-id last-progress-at]} (:persistence state)]
+        (submit-persistence-report
+         "File saving has made no progress for more than five minutes"
+         {:code :saving-stalled
+          :file-id (failing-file-id state)
+          :commit-id (peek queue)
+          :run-id run-id
+          :status status
+          :queued-commits (count queue)
+          :elapsed-ms (- now last-progress-at)
+          :can-edit (dm/get-in state [:permissions :can-edit])
+          :read-only? (dm/get-in state [:workspace-global :read-only?])
+          :preview-id (dm/get-in state [:workspace-global :preview-id])
+          :render-context-lost? (dm/get-in state [:render-state :lost])})))))
 
 (defn- check-persistence
   []
@@ -239,6 +253,19 @@
     (update [_ state]
       (assoc state :persistence {:queue #queue [] :index {} :status :saved}))))
 
+(defn- sustained-failure-report
+  "Reports a queue that has been failing long enough to count as an outage,
+  once per run."
+  [state]
+  (let [pstate  (:persistence state)
+        elapsed (when-let [since (:failing-since pstate)]
+                  (- (inst-ms (ct/now)) since))]
+    (if (and (some? elapsed)
+             (> elapsed sustained-failure-threshold-ms)
+             (not (::sustained-reported? pstate)))
+      (rx/of (report-sustained-failure elapsed))
+      (rx/empty))))
+
 (defn- slow-retry-cycle
   "Attempts a halted queue at a slow pace until the queue resumes,
   persistence restarts, or the workspace closes."
@@ -286,6 +313,12 @@
                                                 :commit-id commit-id
                                                 :hint (ex-message cause)
                                                 ::errors/handled? true))
+                           ;; Compared here, where the previous code is still
+                           ;; in place; the effect below reads the answer.
+                           (assoc ::already-reported? (= code (:reported-failure pstate)))
+                           (assoc :reported-failure code)
+                           ;; Start of the current run of failures.
+                           (update :failing-since d/nilv (inst-ms (ct/now)))
                            (dissoc :run-id :last-progress-at :stall-reported?))))))))
 
      ptk/WatchEvent
@@ -313,6 +346,7 @@
 
            (rx/merge
             (rx/of (ptk/data-event ::error cause))
+            (sustained-failure-report state)
             (if (= :retry action)
               (slow-retry-cycle stream)
               (rx/empty))))))
@@ -324,7 +358,7 @@
          ;; Warn without the global handlers, which may reload or navigate
          ;; away while the retained changes are still recoverable.
          (:retry :warn)
-         (errors/flash-persistence cause)
+         (errors/flash-persistence cause (dm/get-in state [:persistence ::already-reported?]))
 
          ;; Nothing can be saved from here: the general handler chooses what
          ;; the user sees and reports it.
@@ -332,6 +366,45 @@
          (errors/on-error cause)
 
          nil)))))
+
+(defn- report-sustained-failure
+  "Submits the outage report, once per run of failures."
+  [elapsed-ms]
+  (ptk/reify ::report-sustained-failure
+    ptk/UpdateEvent
+    (update [_ state]
+      (assoc-in state [:persistence ::sustained-reported?] true))
+
+    ptk/EffectEvent
+    (effect [_ state _]
+      (let [{:keys [queue error]} (:persistence state)]
+        (submit-persistence-report
+         "File saving has been failing for more than five minutes"
+         {:code :saving-sustained-failure
+          :elapsed-ms elapsed-ms
+          :cause-type (:cause-type error)
+          :file-id (failing-file-id state)
+          :queued-commits (count queue)})))))
+
+(defn- clear-reported-failure
+  "Forgets the failure the user was warned about. A non-nil `elapsed-ms`
+  reports the end of a run already reported as an outage."
+  [elapsed-ms]
+  (ptk/reify ::clear-reported-failure
+    ptk/UpdateEvent
+    (update [_ state]
+      (update state :persistence dissoc
+              :reported-failure ::already-reported?
+              :failing-since ::sustained-reported?))
+
+    ptk/EffectEvent
+    (effect [_ state _]
+      (when (some? elapsed-ms)
+        (submit-persistence-report
+         "File saving recovered after failing for a long time"
+         {:code :saving-recovered
+          :elapsed-ms elapsed-ms
+          :file-id (failing-file-id state)})))))
 
 (defn- commit-persisted
   [commit]
@@ -345,7 +418,18 @@
       (-> state
           (d/update-in-when [:persistence :index (:id commit)]
                             assoc ::acknowledged? true)
-          (update :persistence dissoc ::recovering?)))))
+          (update :persistence dissoc ::recovering?)))
+
+    ptk/WatchEvent
+    (watch [_ state _]
+      ;; A save that lands takes away the warning left by an earlier failure.
+      (let [{:keys [reported-failure failing-since] :as pstate} (:persistence state)]
+        (when (some? reported-failure)
+          (rx/of (clear-reported-failure
+                  ;; Only a run reported as an outage reports its end.
+                  (when (::sustained-reported? pstate)
+                    (- (inst-ms (ct/now)) failing-since)))
+                 (ntf/hide :tag :persistence)))))))
 
 (defn- update-file-request
   "Issues the `update-file` request, tracked as active for its whole life,
@@ -544,6 +628,12 @@
 (defn initialize-persistence
   []
   (ptk/reify ::initialize-persistence
+    ptk/UpdateEvent
+    (update [_ state]
+      (update state :persistence dissoc
+              :reported-failure ::already-reported?
+              :failing-since ::sustained-reported?))
+
     ptk/WatchEvent
     (watch [_ _ stream]
       (log/debug :hint "initialize persistence")

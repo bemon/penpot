@@ -190,7 +190,7 @@
   synchronously from inside an error handler creates a re-entrant
   event-processing cycle that can exhaust the JS call stack
   (RangeError: Maximum call stack size exceeded)."
-  [& {:keys [type hint cause timeout report-link?]
+  [& {:keys [type hint cause timeout tag report-link?]
       :or {type :handled timeout 5000}}]
   (let [report (when (ex/exception? cause) (generate-report cause))]
     (when report
@@ -209,6 +209,9 @@
                  :type :toast
                  :level :error
                  :timeout timeout}
+          (some? tag)
+          (assoc :tag tag)
+
           (and report-link? report)
           (assoc :links [{:label (tr "labels.download" "report.txt")
                           :callback (partial download-report! report)}])))))))
@@ -251,18 +254,23 @@
       (= :vern-conflict code)))
 
 (defn flash-persistence
-  [cause]
-  (let [data (ex-data cause)]
-    (if (delegated-persistence-failure? data)
-      ;; The persistence state wraps the failure and records the original
-      ;; type under :cause-type; dispatch on it to reach the cause's handler.
-      (on-error (-> (exception->error-data cause)
-                    (assoc :type (or (:cause-type data) (:type data)))))
-      (flash :cause cause
-             :type :handled
-             :timeout nil
-             :report-link? true
-             :hint (tr "errors.save-failed")))))
+  "Warns about a failed save. A `repeated` failure still shows the warning but
+  is not reported again."
+  ([cause]
+   (flash-persistence cause false))
+  ([cause repeated]
+   (let [data (ex-data cause)]
+     (if (delegated-persistence-failure? data)
+       ;; The persistence state wraps the failure and records the original
+       ;; type under :cause-type; dispatch on it to reach the cause's handler.
+       (on-error (-> (exception->error-data cause)
+                     (assoc :type (or (:cause-type data) (:type data)))))
+       (flash :cause cause
+              :type (if repeated :silent :handled)
+              :timeout nil
+              :tag :persistence
+              :report-link? true
+              :hint (tr "errors.save-failed"))))))
 
 (defmethod ptk/handle-error :persistence
   [error]

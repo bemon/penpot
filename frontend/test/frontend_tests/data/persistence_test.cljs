@@ -9,6 +9,7 @@
    [app.common.time :as ct]
    [app.common.uuid :as uuid]
    [app.main.data.changes :as dch]
+   [app.main.data.notifications :as ntf]
    [app.main.data.persistence :as dps]
    [app.main.data.render-wasm :as drw]
    [app.main.errors :as errors]
@@ -658,6 +659,38 @@
       (t/is (= :saved (get-in @store [:persistence :status])))
       (t/is (empty? (get-in @store [:persistence :queue]))))))
 
+(t/deftest a-repeated-failure-warns-the-user-without-reporting-twice
+  (with-failing-saves
+    1000
+    {:retry-config no-retry-config
+     :cause (ex-info "gateway" {:type :gateway-error :code :gateway-error})}
+    (fn [{:keys [flashes store file-id]}]
+      (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+      (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+      (t/is (= :error (get-in @store [:persistence :status])))
+      (t/is (= 2 (count @flashes)) "the user is warned about every failed save")
+      (t/is (= [:handled :silent] (mapv :type @flashes))
+            "the same failure is reported once"))))
+
+(t/deftest a-recovered-save-takes-the-warning-away
+  (with-failing-saves
+    2
+    {:retry-config no-retry-config}
+    (fn [{:keys [flashes store file-id]}]
+      (let [hidden (atom [])]
+        (with-redefs [ntf/hide (fn [& params]
+                                 (swap! hidden conj (apply hash-map params))
+                                 (ptk/data-event ::hidden))]
+          (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+          (t/is (= :error (get-in @store [:persistence :status])))
+          (t/is (= [:persistence] (mapv :tag @flashes))
+                "the warning is tagged so only it can be taken away")
+          (t/is (empty? @hidden))
+
+          (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+          (t/is (= :saved (get-in @store [:persistence :status])))
+          (t/is (= [{:tag :persistence}] @hidden)))))))
+
 (t/deftest a-failure-arriving-after-the-commit-was-saved-is-ignored
   (with-failing-saves
     1
@@ -699,6 +732,101 @@
         (rx/push! response {:revn 1})
         (t/is (= :saved (get-in @store [:persistence :status])))
         (t/is (empty? (get-in @store [:persistence :queue])))))))
+
+;; ---------------------------------------------------------------------------
+;; telling an outage apart from a blip
+;; ---------------------------------------------------------------------------
+
+(defn- with-reports
+  "Runs `f` with the clock in hand and every report collected, so a test can
+  let time pass and say what was reported."
+  [f]
+  (let [clock   (atom 0)
+        reports (atom [])
+        causes  (atom [])
+        render  errors/generate-report]
+    (with-redefs [ct/now                 (mock/stub #(ct/inst @clock))
+                  errors/generate-report (fn [cause]
+                                           (swap! causes conj cause)
+                                           (render cause))
+                  errors/submit-report   (fn [& params]
+                                           (swap! reports conj (apply hash-map params)))]
+      (f {:clock clock :reports reports :causes causes}))))
+
+(def ^:private outage-threshold-ms @#'dps/sustained-failure-threshold-ms)
+(def ^:private under-threshold-ms (quot outage-threshold-ms 3))
+(def ^:private over-threshold-ms (+ outage-threshold-ms 10000))
+
+(defn- report-codes
+  [causes]
+  (mapv #(:code (ex-data %)) @causes))
+
+(t/deftest a-save-failing-for-a-long-time-is-reported-once-more
+  (with-timers
+    (fn [{:keys [fire!]}]
+      (with-reports
+        (fn [{:keys [clock reports causes]}]
+          (with-failing-saves
+            1000
+            {:retry-config no-retry-config}
+            (fn [{:keys [store file-id]}]
+              (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+              (t/is (empty? @reports) "one failed save is not yet an outage")
+
+              (reset! clock under-threshold-ms)
+              (fire! dps/slow-retry-delay-ms)
+              (t/is (empty? @reports) "and neither is it a short while later")
+
+              (reset! clock over-threshold-ms)
+              (fire! dps/slow-retry-delay-ms)
+              (t/is (= [:saving-sustained-failure] (report-codes causes))
+                    "a queue failing this long is worth its own report")
+              (t/is (= over-threshold-ms (:elapsed-ms (ex-data (last @causes)))))
+
+              (reset! clock (* 3 outage-threshold-ms))
+              (fire! dps/slow-retry-delay-ms)
+              (t/is (= 1 (count @reports)) "and is reported only once"))))))))
+
+(t/deftest a-save-coming-back-after-an-outage-is-reported
+  (with-timers
+    (fn [{:keys [fire!]}]
+      (with-reports
+        (fn [{:keys [clock causes]}]
+          (with-failing-saves
+            4
+            {:retry-config no-retry-config}
+            (fn [{:keys [store file-id]}]
+              (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+              (fire! dps/slow-retry-delay-ms)
+
+              (reset! clock over-threshold-ms)
+              (fire! dps/slow-retry-delay-ms)
+              (t/is (= [:saving-sustained-failure] (report-codes causes)))
+
+              ;; The connection comes back and the queue drains.
+              (reset! clock (* 2 outage-threshold-ms))
+              (fire! dps/slow-retry-delay-ms)
+              (t/is (= :saved (get-in @store [:persistence :status])))
+              (t/is (= [:saving-sustained-failure :saving-recovered]
+                       (report-codes causes))
+                    "how long the outage lasted is the part support needs")
+              (t/is (= (* 2 outage-threshold-ms)
+                       (:elapsed-ms (ex-data (last @causes))))))))))))
+
+(t/deftest a-save-that-stumbles-once-is-not-reported-as-an-outage
+  (with-timers
+    (fn [{:keys [fire!]}]
+      (with-reports
+        (fn [{:keys [reports]}]
+          (with-failing-saves
+            2
+            {:retry-config no-retry-config}
+            (fn [{:keys [store file-id]}]
+              (ptk/emit! store (local-commit file-id) ::dps/force-persist)
+              (fire! dps/slow-retry-delay-ms)
+              (t/is (= :saved (get-in @store [:persistence :status])))
+              (t/is (empty? @reports)
+                    "a blip is covered by the warning the user already saw"))))))))
 
 (defn- queued-state
   "A store state holding one commit, queued and being saved."

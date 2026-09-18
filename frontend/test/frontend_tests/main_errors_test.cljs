@@ -483,11 +483,17 @@
                            (errors/on-error error)))))
         (t/is (= 2 (count @rejected)))
         (t/is (= 1 (count @reports)))
-        ;; A standalone timeout and a later save failure are new incidents.
+        ;; A standalone timeout is a new incident.
         (errors/on-error (ex-info "Save timed out" {:type :persistence :code :save-timeout}))
         (t/is (= 2 (count @reports)))
+        ;; A queue that keeps failing on the same cause warns the user every
+        ;; time but is only worth reporting once.
         (ptk/emit! store (#'dps/persistence-failed (uuid/next) cause))
-        (t/is (= 3 (count @reports)))
+        (t/is (= 2 (count @reports)))
+        (ptk/emit! store (#'dps/persistence-failed
+                          (uuid/next)
+                          (ex-info "Save failed" {:type :network :code :invalid-save-response})))
+        (t/is (= 3 (count @reports)) "A different cause is a new incident")
         (finally
           (rx/dispose! store))))))
 
