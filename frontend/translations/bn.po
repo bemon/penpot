@@ -11,22 +11,15 @@ msgstr ""
 "Plural-Forms: nplurals=2; plural=n > 1;\n"
 "X-Generator: Weblate 5.6-dev\n"
 
-#: src/app/main/ui/auth/register.cljs:232, src/app/main/ui/static.cljs:182, src/app/main/ui/viewer/login.cljs:109
+#: src/app/main/ui/auth/register.cljs:231, src/app/main/ui/static.cljs:182, src/app/main/ui/viewer/login.cljs:109
 msgid "auth.already-have-account"
 msgstr "অ্যাকাউন্ট আছে?"
 
-#: src/app/main/ui/auth/register.cljs:277
-#, unused
-msgid "auth.check-your-email"
-msgstr ""
-"আপনার ইমেইল চেক করুন এবং লিংকে ক্লিক করে ভেরিফাই করে Penpot ব্যবহার শুরু "
-"করুন।"
-
-#: src/app/main/ui/auth/recovery.cljs:77
+#: src/app/main/ui/auth/recovery.cljs:83
 msgid "auth.confirm-password"
 msgstr "পাসওয়ার্ড নিশ্চিত করুন"
 
-#: src/app/main/ui/auth/register.cljs:244
+#: src/app/main/ui/auth/register.cljs:243
 msgid "auth.create-demo-account"
 msgstr "ডেমো অ্যাকাউন্ট তৈরী করুন"
 
@@ -40,18 +33,13 @@ msgstr ""
 msgid "auth.forgot-password"
 msgstr "পাসওয়ার্ড ভুলে গেছেন?"
 
-#: src/app/main/ui/auth/register.cljs:180, src/app/main/ui/auth/register.cljs:346
+#: src/app/main/ui/auth/register.cljs:179, src/app/main/ui/auth/register.cljs:339
 msgid "auth.fullname"
 msgstr "পুরো নাম"
 
-#: src/app/main/ui/auth/register.cljs:236, src/app/main/ui/static.cljs:185, src/app/main/ui/viewer/login.cljs:112
+#: src/app/main/ui/auth/register.cljs:235, src/app/main/ui/static.cljs:185, src/app/main/ui/viewer/login.cljs:112
 msgid "auth.login-here"
 msgstr "এখানে লগিন করুন"
-
-#: src/app/main/ui/auth/login.cljs:195
-#, unused
-msgid "auth.login-submit"
-msgstr "লগিন"
 
 #: src/app/main/ui/auth/login.cljs:248
 msgid "auth.login-with-github-submit"
@@ -73,10 +61,10 @@ msgstr "LDAP"
 msgid "auth.login-with-oidc-submit"
 msgstr "ওপেনআইডি"
 
-#: src/app/main/ui/auth/recovery.cljs:70
+#: src/app/main/ui/auth/recovery.cljs:76
 msgid "auth.new-password"
 msgstr "নতুন পাসওয়ার্ড টাইপ করুন"
 
-#: src/app/main/ui/auth/recovery.cljs:41
+#: src/app/main/ui/auth/recovery.cljs:47
 msgid "errors.invalid-recovery-token"
 msgstr "রিকভারি টোকেন সঠিক নয়।"
