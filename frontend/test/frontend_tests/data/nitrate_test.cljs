@@ -132,13 +132,12 @@
          {:iss :team-invitation
           :state :created
           :team-id "team-1"
+          :organization-id "organization-1"
           :role :editor
-          :organization-invitation-audit
-          {:organization-id "organization-1"
-           :invitation-id "invitation-1"
-           :user-id "invitee-1"
-           :user-who-send-invitation "inviter-1"
-           :organization-member-count-before 4}})
+          :invitation-id "invitation-1"
+          :user-id "invitee-1"
+          :user-who-send-invitation "inviter-1"
+          :organization-member-count-before 4})
 
         (t/is (= {::ev/name "accept-organization-invitation"
                   ::ev/origin "team-invitation-acceptance"
@@ -159,12 +158,12 @@
          {:iss :team-invitation
           :state :created
           :organization-id "organization-2"
+          :organization-team-id "team-default"
           :role :viewer
-          :organization-invitation-audit
-          {:invitation-id "invitation-2"
-           :user-id "invitee-2"
-           :user-who-send-invitation "inviter-2"
-           :organization-member-count-before 2}})
+          :invitation-id "invitation-2"
+          :user-id "invitee-2"
+          :user-who-send-invitation "inviter-2"
+          :organization-member-count-before 0})
 
         (t/is (= {::ev/name "accept-organization-invitation"
                   ::ev/origin "organization-invitation-acceptance"
@@ -175,8 +174,19 @@
                   :user-who-send-invitation "inviter-2"
                   :organization-member-add-source "direct-organization-invitation"
                   :belongs-to-team-on-add false
-                  :organization-member-count-before 2}
-                 @(first @emitted)))))))
+                  :organization-member-count-before 0}
+                 @(first @emitted))))
+
+      (reset! emitted [])
+      (t/testing "does not audit a team invitation for an existing organization member"
+        (verify-token/handle-token
+         {:iss :team-invitation
+          :state :created
+          :team-id "team-3"
+          :organization-id "organization-3"
+          :role :editor})
+
+        (t/is (= 3 (count @emitted)))))))
 
 (t/deftest build-admin-console-url-preserves-public-uri-subpath
   (t/testing "builds admin console routes below the configured Penpot subpath"

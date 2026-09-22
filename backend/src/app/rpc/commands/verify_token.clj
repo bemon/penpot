@@ -308,15 +308,15 @@
                 (assoc :organization-team-id accepted-team-id)
 
                 organization-id-on-add
-                (assoc :organization-invitation-audit
-                       (audit/clean-props
-                        (cond-> {:invitation-id (:id invitation)
-                                 :user-id (:id profile)
-                                 :user-who-send-invitation (:created-by invitation)
-                                 :organization-member-count-before
-                                 organization-member-count-before}
-                          team-id
-                          (assoc :organization-id organization-id-on-add)))))))))
+                (merge (audit/clean-props
+                        {:invitation-id (:id invitation)
+                         :user-id (:id profile)
+                         :user-who-send-invitation (:created-by invitation)
+                         :organization-member-count-before
+                         organization-member-count-before}))
+
+                (and organization-id-on-add team-id)
+                (assoc :organization-id organization-id-on-add))))))
 
       (do
         ;; If the user is not logged-in and the invitation has been canceled
