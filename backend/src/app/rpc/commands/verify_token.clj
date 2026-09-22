@@ -244,18 +244,6 @@
                          (not (:is-member membership)))
                 (:organization-id membership))
 
-              organization-add-source
-              (when organization-id-on-add
-                (if organization-id
-                  "direct-organization-invitation"
-                  "team-invitation"))
-
-              organization-event-origin
-              (when organization-id-on-add
-                (if organization-id
-                  "organization-invitation-acceptance"
-                  "team-invitation-acceptance"))
-
               organization-member-count-before
               (when organization-id-on-add
                 (count
@@ -321,17 +309,14 @@
 
                 organization-id-on-add
                 (assoc :organization-invitation-audit
-                       {:origin organization-event-origin
-                        :props
-                        (-> props
-                            (assoc :organization-id organization-id-on-add
-                                   :organization-member-add-source organization-add-source
-                                   :belongs-to-team-on-add (boolean team-id)
-                                   :user-id (:id profile)
-                                   :user-who-send-invitation (:created-by invitation)
-                                   :organization-member-count-before
-                                   organization-member-count-before)
-                            (audit/clean-props))}))))))
+                       (audit/clean-props
+                        (cond-> {:invitation-id (:id invitation)
+                                 :user-id (:id profile)
+                                 :user-who-send-invitation (:created-by invitation)
+                                 :organization-member-count-before
+                                 organization-member-count-before}
+                          team-id
+                          (assoc :organization-id organization-id-on-add)))))))))
 
       (do
         ;; If the user is not logged-in and the invitation has been canceled

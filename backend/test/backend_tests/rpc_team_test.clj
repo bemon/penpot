@@ -533,19 +533,18 @@
         (t/is (not (contains? (:props event) :organization-member-count-before)))
         (t/is (= :editor (get-in event [:props :role])))
         (t/is (uuid? (get-in event [:props :invitation-id])))
-        (t/is (= "organization-invitation-acceptance"
-                 (:origin @frontend-event)))
-        (t/is (= organization-id
-                 (get-in @frontend-event [:props :organization-id])))
+        (t/is (not (contains? @frontend-event :organization-id)))
+        (t/is (not (contains? @frontend-event :team-id)))
+        (t/is (not (contains? @frontend-event :role)))
+        (t/is (not (contains? @frontend-event :origin)))
+        (t/is (= (get-in event [:props :invitation-id])
+                 (:invitation-id @frontend-event)))
         (t/is (= (:id invitee)
-                 (get-in @frontend-event [:props :user-id])))
+                 (:user-id @frontend-event)))
         (t/is (= (:id inviter)
-                 (get-in @frontend-event [:props :user-who-send-invitation])))
-        (t/is (= "direct-organization-invitation"
-                 (get-in @frontend-event [:props :organization-member-add-source])))
-        (t/is (false? (get-in @frontend-event [:props :belongs-to-team-on-add])))
+                 (:user-who-send-invitation @frontend-event)))
         (t/is (= 3
-                 (get-in @frontend-event [:props :organization-member-count-before])))
+                 (:organization-member-count-before @frontend-event)))
         (t/is (not-any? #(contains? #{"accept-team-invitation"
                                       "accept-team-invitation-from"}
                                     (:name (second %)))
@@ -587,20 +586,19 @@
         (t/is (not (contains? (:props event) :organization-member-add-source)))
         (t/is (not (contains? (:props event) :belongs-to-team-on-add)))
         (t/is (not (contains? (:props event) :organization-member-count-before)))
-        (t/is (= "team-invitation-acceptance"
-                 (:origin @frontend-event)))
-        (t/is (= (:id team) (get-in @frontend-event [:props :team-id])))
         (t/is (= organization-id
-                 (get-in @frontend-event [:props :organization-id])))
+                 (:organization-id @frontend-event)))
+        (t/is (not (contains? @frontend-event :team-id)))
+        (t/is (not (contains? @frontend-event :role)))
+        (t/is (not (contains? @frontend-event :origin)))
+        (t/is (= (get-in event [:props :invitation-id])
+                 (:invitation-id @frontend-event)))
         (t/is (= (:id invitee)
-                 (get-in @frontend-event [:props :user-id])))
+                 (:user-id @frontend-event)))
         (t/is (= (:id inviter)
-                 (get-in @frontend-event [:props :user-who-send-invitation])))
-        (t/is (= "team-invitation"
-                 (get-in @frontend-event [:props :organization-member-add-source])))
-        (t/is (true? (get-in @frontend-event [:props :belongs-to-team-on-add])))
+                 (:user-who-send-invitation @frontend-event)))
         (t/is (= 5
-                 (get-in @frontend-event [:props :organization-member-count-before]))))
+                 (:organization-member-count-before @frontend-event))))
 
       (th/reset-mock! audit-mock)
       (db/insert! (:app.db/pool th/*system*)
