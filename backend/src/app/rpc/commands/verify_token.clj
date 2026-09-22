@@ -6,6 +6,7 @@
 
 (ns app.rpc.commands.verify-token
   (:require
+   [app.common.data :as d]
    [app.common.exceptions :as ex]
    [app.common.schema :as sm]
    [app.common.time :as ct]
@@ -308,7 +309,7 @@
                 (assoc :organization-team-id accepted-team-id)
 
                 organization-id-on-add
-                (merge (audit/clean-props
+                (merge (d/without-nils
                         {:invitation-id (:id invitation)
                          :user-id (:id profile)
                          :user-who-send-invitation (:created-by invitation)
