@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AsyncLocalStorage } from "async_hooks";
+import type { Server as HttpServer } from "node:http";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ExecuteCodeTool } from "./tools/ExecuteCodeTool";
@@ -124,6 +125,7 @@ export class PenpotMcpServer {
     private readonly tools: ToolInfo[];
     public readonly configLoader: ConfigurationLoader;
     private app: any;
+    private httpServer?: HttpServer;
     public readonly pluginBridge: PluginBridge;
     private readonly replServer: ReplServer | null;
     private apiDocs: ApiDocs;
@@ -483,7 +485,7 @@ export class PenpotMcpServer {
         this.setupHttpEndpoints();
 
         return new Promise((resolve) => {
-            this.app.listen(this.port, this.host, async () => {
+            this.httpServer = this.app.listen(this.port, this.host, async () => {
                 this.logger.info(`Multi-user mode: ${this.isMultiUserMode()}`);
                 this.logger.info(
                     `Multi-instance mode with Redis-backed transport: ${this.redisBridge ? "true" : "false"}`
@@ -519,6 +521,13 @@ export class PenpotMcpServer {
     public async stop(): Promise<void> {
         this.logger.info("Stopping Penpot MCP Server...");
         clearInterval(this.sessionTimeoutInterval);
+        if (this.httpServer) {
+            // open SSE and streamable sessions would otherwise keep the server from closing
+            this.httpServer.closeAllConnections();
+            await new Promise<void>((resolve, reject) => {
+                this.httpServer!.close((error) => (error ? reject(error) : resolve()));
+            });
+        }
         await this.pluginBridge.close();
         await this.redisBridge?.close();
         if (this.replServer) {
