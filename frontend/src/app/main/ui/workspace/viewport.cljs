@@ -129,12 +129,16 @@
                                (into [] (keep (d/getf objects-modified)))
                                (not-empty))
 
-        ;; While actively resizing, `selected-shapes` changes on every pointer
-        ;; move (live modifiers). Throttle the copy used for the size badge so
-        ;; its text updates at most once per interval instead of every single
-        ;; frame, while still staying live during the drag.
+        ;; While resizing, `selected-shapes` changes on every pointer move
+        ;; (live modifiers); throttle the copy used for the size badge so its
+        ;; text doesn't update on every single frame. While dragging, the
+        ;; badge instead needs to track the shape's position 1:1 like the
+        ;; outline does — any throttling there reads as visible lag — so it
+        ;; uses the immediate value, unthrottled.
         selected-shapes'  (ui-hooks/use-throttle 100 selected-shapes)
-        badge-shapes      (if (= transform :resize) selected-shapes' selected-shapes)
+        badge-shapes      (if (= transform :resize)
+                             selected-shapes'
+                             selected-shapes)
 
         ;; STATE
         alt?               (mf/use-state false)
@@ -518,7 +522,7 @@
            :modifiers modifiers}])
 
        (when (and (seq selected-shapes)
-                  (or (not transform) (= transform :resize))
+                  (or (not transform) (contains? #{:resize :move} transform))
                   (not text-editing?)
                   (not edition)
                   (not read-only?)
