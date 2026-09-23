@@ -12,6 +12,18 @@ export class EmptyToolArgs {
 }
 
 /**
+ * Schema of the optional `fileId` argument of tools that operate on a Penpot file.
+ */
+export const FILE_ID_SCHEMA = z
+    .string()
+    .min(1, "fileId cannot be empty")
+    .optional()
+    .describe(
+        "ID of the Penpot file to operate on, as listed by the `list_connected_files` tool. " +
+            "Required if several files are connected; may be omitted if only one file is connected."
+    );
+
+/**
  * Base class for type-safe tools with automatic schema generation and validation.
  *
  * This class provides type safety through automatic validation and strongly-typed

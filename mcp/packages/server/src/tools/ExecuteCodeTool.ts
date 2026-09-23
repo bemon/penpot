@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Tool } from "../Tool";
+import { FILE_ID_SCHEMA, Tool } from "../Tool";
 import type { ToolResponse } from "../ToolResponse";
 import { TextResponse } from "../ToolResponse";
 import "reflect-metadata";
@@ -16,12 +16,18 @@ export class ExecuteCodeArgs {
             .string()
             .min(1, "Code cannot be empty")
             .describe("The JavaScript code to execute in the plugin context."),
+        fileId: FILE_ID_SCHEMA,
     };
 
     /**
      * The JavaScript code to execute in the plugin context.
      */
     code!: string;
+
+    /**
+     * The ID of the Penpot file in which to execute the code.
+     */
+    fileId?: string;
 }
 
 /**
@@ -52,6 +58,7 @@ export class ExecuteCodeTool extends Tool<ExecuteCodeArgs> {
             "stored attributes can be referenced in future calls to this tool, so any intermediate results that " +
             "could come in handy later should be stored in `storage` instead of just a fleeting variable; " +
             "you can also store functions and thus build up a library).\n" +
+            "Each connected Penpot file has its own `storage`.\n" +
             "Think of the code being executed as the body of a function: " +
             "The tool call returns whatever you return in the applicable `return` statement, if any. " +
             "You can return arbitrary JS objects; no need to apply JSON.stringify.\n" +
@@ -67,7 +74,7 @@ export class ExecuteCodeTool extends Tool<ExecuteCodeArgs> {
     protected async executeCore(args: ExecuteCodeArgs): Promise<ToolResponse> {
         const taskParams: ExecuteCodeTaskParams = { code: args.code };
         const task = new ExecuteCodePluginTask(taskParams);
-        const result = await this.mcpServer.pluginBridge.executePluginTask(task);
+        const result = await this.mcpServer.pluginBridge.executePluginTask(task, { fileId: args.fileId });
 
         if (result.data !== undefined) {
             return new TextResponse(JSON.stringify(result.data, null, 2));

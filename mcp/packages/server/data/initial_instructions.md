@@ -1,10 +1,14 @@
-You have access to Penpot tools in order to interact with a Penpot design project directly.
-As a precondition, the user must connect the Penpot design project to the MCP server using the Penpot MCP Plugin.
+You have access to Penpot tools in order to interact with Penpot design files directly.
+As a precondition, the user must connect Penpot design files to the MCP server using the Penpot MCP Plugin.
+Each browser tab running the plugin connects the file open in it, so several files, also from different projects,
+can be connected at the same time. Use `list_connected_files` to see them. If more than one file is connected,
+pass the `fileId` argument to every tool that operates on a file (`execute_code`, `export_shape`, `import_image`);
+otherwise the call fails.
 
 # Executing Code
 
 One of your key tools is the `execute_code` tool, which allows you to run JavaScript code using the Penpot Plugin API
-directly in the connected project.
+directly in a connected file.
 
 VERY IMPORTANT: When writing code, NEVER LOG INFORMATION YOU ARE ALSO RETURNING. It would duplicate the information you receive!
 
@@ -15,6 +19,7 @@ This is the full list of types/interfaces in the Penpot API: $api_types
 
 You use the `storage` object extensively to store data and utility functions you define across tool calls.
 This allows you to inspect intermediate results while still being able to build on them in subsequent code executions.
+Each connected file has its own `storage`.
 
 ## Asynchronous Updates
 
