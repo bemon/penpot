@@ -1,33 +1,56 @@
 import { WebSocket, WebSocketServer } from "ws";
 import * as http from "http";
+import { randomUUID } from "crypto";
 import { AbstractPluginTask, PluginTask } from "./PluginTask";
 import { RemotePluginTask } from "./RemotePluginTask";
 import { PluginTaskRequest, PluginTaskResponse, PluginTaskResult } from "@penpot/mcp-common";
 import { createLogger } from "./logger";
-import { assertPluginResponsive, PluginLivenessState } from "./PluginLiveness";
+import { assertPluginResponsive } from "./PluginLiveness";
+import { parsePluginFileInfo, PluginConnectionDescriptor } from "./PluginConnection";
+import { ConnectedFileSummary, PluginConnectionSelector } from "./PluginConnectionSelector";
 import type { PenpotMcpServer } from "./PenpotMcpServer";
 import type { RedisBridge } from "./RedisBridge";
 
 const KEEP_ALIVE_TIME = 30000; // 30 seconds
 
-interface ClientConnection extends PluginLivenessState {
+/**
+ * Maximum number of simultaneous plugin connections (browser tabs) per user token in multi-user mode.
+ */
+export const MAX_CONNECTIONS_PER_USER = 20;
+
+interface ClientConnection extends PluginConnectionDescriptor {
     socket: WebSocket;
     userToken: string | null;
     pingInterval: NodeJS.Timeout;
 }
 
 /**
+ * Target of a plugin task.
+ */
+export interface PluginTaskTarget {
+    /**
+     * ID of the Penpot file in which to run the task; may be omitted if only one file is connected.
+     */
+    fileId?: string;
+}
+
+/**
  * Manages WebSocket connections to Penpot plugin instances and handles plugin tasks
  * over these connections.
+ *
+ * Each connection belongs to one browser tab running the plugin and reports the Penpot file
+ * open in that tab. A user may hold several connections; each task is routed to one of them
+ * based on the requested file (see {@link PluginConnectionSelector}).
  */
 export class PluginBridge {
     public static readonly MULTIUSER_CONNECTION_ERROR_MESSAGE = `No Penpot instance connected for user token. Please ensure that Penpot is connected and that the MCP client connection is using the correct token.`;
+
+    public static readonly NO_CONNECTION_ERROR_MESSAGE = `No Penpot plugin instances are currently connected. Please ensure the plugin is running and connected.`;
 
     private readonly logger = createLogger("PluginBridge");
     private readonly wsServer: WebSocketServer;
 
     private readonly connectedClients: Map<WebSocket, ClientConnection> = new Map();
-    private readonly clientsByToken: Map<string, ClientConnection> = new Map();
     private readonly pendingTasks: Map<string, AbstractPluginTask<any, any>> = new Map();
     private readonly taskTimeouts: Map<string, NodeJS.Timeout> = new Map();
 
@@ -72,73 +95,42 @@ export class PluginBridge {
                 return;
             }
 
-            if (userToken) {
-                this.logger.info("New WebSocket connection established (token provided)");
-            } else {
-                this.logger.info("New WebSocket connection established");
+            const admissionError = this.getAdmissionError(userToken);
+            if (admissionError) {
+                this.logger.warn("Rejecting plugin connection: %s", admissionError);
+                ws.close(1008, admissionError);
+                return;
             }
 
-            // start the per-connection keep-alive ping interval
-            const pingInterval = setInterval(() => {
-                ws.ping();
-            }, KEEP_ALIVE_TIME);
-
-            // register the client connection with both indexes
             const connection: ClientConnection = {
-                socket: ws,
-                userToken,
-                pingInterval,
+                connectionId: randomUUID(),
+                file: null,
+                connectedAt: Date.now(),
                 lastHeartbeat: Date.now(),
                 frozen: false,
+                socket: ws,
+                userToken,
+                pingInterval: setInterval(() => ws.ping(), KEEP_ALIVE_TIME),
             };
             this.connectedClients.set(ws, connection);
-            if (userToken) {
-                // ensure only one connection per userToken
-                if (this.clientsByToken.has(userToken)) {
-                    this.logger.warn("Duplicate connection for given user token; rejecting new connection");
-                    this.removeConnection(ws);
-                    ws.close(1008, "Duplicate connection for given user token; close previous connection first.");
-                    return;
-                }
+            this.logger.info(
+                "New WebSocket connection %s established (token provided: %s)",
+                connection.connectionId,
+                userToken !== null
+            );
 
-                this.clientsByToken.set(userToken, connection);
-
-                // In multi-instance mode, subscribe to this token's Redis request channel so
-                // that task requests issued by other instances are dispatched to this plugin.
-                if (this.redisBridge) {
-                    const tokenForSubscription = userToken;
-                    this.redisBridge
-                        .subscribeToTasks(userToken, (request) =>
-                            this.dispatchForwardedTask(tokenForSubscription, request)
-                        )
-                        .catch((error) => this.logger.error(error, "Failed to subscribe to Redis task channel"));
-                }
+            // In multi-instance mode, subscribe to this token's Redis request channel so
+            // that task requests issued by other instances are dispatched to this plugin.
+            if (userToken && this.redisBridge) {
+                this.redisBridge
+                    .subscribeToTasks(userToken, (request) => this.dispatchForwardedTask(userToken, request))
+                    .catch((error) => this.logger.error(error, "Failed to subscribe to Redis task channel"));
             }
 
-            ws.on("message", (data: Buffer) => {
-                this.logger.debug("Received WebSocket message: %s", data.toString());
-                try {
-                    // any plugin message proves the page event loop is running
-                    connection.lastHeartbeat = Date.now();
-
-                    const message = JSON.parse(data.toString());
-                    if (message?.type === "freeze") {
-                        connection.frozen = true;
-                        this.logger.info("Plugin tab reported it is being frozen by the browser");
-                        return;
-                    }
-                    connection.frozen = false;
-                    if (message?.type === "heartbeat") {
-                        return;
-                    }
-                    this.handlePluginTaskResponse(message as PluginTaskResponse<any>);
-                } catch (error) {
-                    this.logger.error(error, "Failure while processing WebSocket message");
-                }
-            });
+            ws.on("message", (data: Buffer) => this.handlePluginMessage(connection, data));
 
             ws.on("close", () => {
-                this.logger.info("WebSocket connection closed");
+                this.logger.info("WebSocket connection %s closed", connection.connectionId);
                 this.removeConnection(ws);
             });
 
@@ -152,12 +144,79 @@ export class PluginBridge {
     }
 
     /**
+     * Determines why a new plugin connection must be rejected, if at all.
+     *
+     * @param userToken - The user token of the new connection
+     * @returns The rejection reason (used as WebSocket close reason), or null to admit the connection
+     */
+    private getAdmissionError(userToken: string | null): string | null {
+        if (!this.mcpServer.isMultiUserMode()) {
+            return null;
+        }
+        const existingCount = this.getLocalConnections(userToken).length;
+        // Redis request channels are keyed by token alone, so a second connection
+        // would also receive the first one's tasks
+        if (this.redisBridge && existingCount > 0) {
+            return "Duplicate connection for given user token; close previous connection first.";
+        }
+        if (existingCount >= MAX_CONNECTIONS_PER_USER) {
+            return `Too many plugin connections for this user (maximum: ${MAX_CONNECTIONS_PER_USER}).`;
+        }
+        return null;
+    }
+
+    /**
+     * Processes a message received on a plugin connection.
+     *
+     * @param connection - The connection the message arrived on
+     * @param data - The raw message
+     */
+    private handlePluginMessage(connection: ClientConnection, data: Buffer): void {
+        this.logger.debug("Received WebSocket message: %s", data.toString());
+        try {
+            // any plugin message proves the page event loop is running
+            connection.lastHeartbeat = Date.now();
+
+            const message = JSON.parse(data.toString());
+            if (message?.type === "freeze") {
+                connection.frozen = true;
+                this.logger.info("Plugin tab reported it is being frozen by the browser");
+                return;
+            }
+            connection.frozen = false;
+            if (message?.type === "heartbeat") {
+                return;
+            }
+            if (message?.type === "register") {
+                this.registerFile(connection, message.file);
+                return;
+            }
+            this.handlePluginTaskResponse(message as PluginTaskResponse<any>);
+        } catch (error) {
+            this.logger.error(error, "Failure while processing WebSocket message");
+        }
+    }
+
+    /**
+     * Records the Penpot file that a plugin connection operates on.
+     *
+     * @param connection - The connection whose file is reported
+     * @param rawFile - The file descriptor as sent by the plugin
+     */
+    private registerFile(connection: ClientConnection, rawFile: unknown): void {
+        const file = parsePluginFileInfo(rawFile);
+        if (!file) {
+            this.logger.warn("Ignoring malformed register message on connection %s", connection.connectionId);
+            return;
+        }
+        connection.file = file;
+        this.logger.info("Connection %s operates on file %s", connection.connectionId, file.fileId);
+    }
+
+    /**
      * Removes a client connection and releases all resources associated with it.
      *
-     * Clears the per-connection keep-alive interval and removes the connection from the
-     * socket-keyed index. The token-keyed index entry (and, in multi-instance mode, the
-     * token's Redis task subscription) is removed only if it is owned by the given
-     * connection. Safe to call with a socket that is not (or no longer) registered.
+     * Safe to call with a socket that is not (or no longer) registered.
      *
      * @param ws - The WebSocket whose connection state should be removed
      */
@@ -168,20 +227,10 @@ export class PluginBridge {
         }
         clearInterval(connection.pingInterval);
         this.connectedClients.delete(ws);
-        if (connection.userToken) {
-            // Perform the token-keyed cleanup only if this connection owns the token registration.
-            // A connection rejected as a duplicate carries the same token but must not remove token associations.
-            if (this.clientsByToken.get(connection.userToken) !== connection) {
-                this.logger.debug("Removed connection does not own its token registration; skipping token cleanup");
-            } else {
-                this.clientsByToken.delete(connection.userToken);
-
-                if (this.redisBridge) {
-                    this.redisBridge
-                        .unsubscribeFromTasks(connection.userToken)
-                        .catch((error) => this.logger.error(error, "Failed to unsubscribe from Redis task channel"));
-                }
-            }
+        if (connection.userToken && this.redisBridge) {
+            this.redisBridge
+                .unsubscribeFromTasks(connection.userToken)
+                .catch((error) => this.logger.error(error, "Failed to unsubscribe from Redis task channel"));
         }
     }
 
@@ -249,156 +298,150 @@ export class PluginBridge {
     }
 
     /**
-     * Determines the client connection to use for executing a task.
+     * Lists the local connections owned by the given user token (all local connections in single-user mode).
      *
-     * In single-user mode, returns the single connected client.
-     * In multi-user mode, returns the client matching the session's userToken.
-     *
-     * @returns The client connection to use
-     * @throws Error if no suitable connection is found or if configuration is invalid
+     * @param userToken - The user token; ignored in single-user mode
      */
-    private getClientConnection(): ClientConnection {
-        if (this.mcpServer.isMultiUserMode()) {
-            const sessionContext = this.mcpServer.getSessionContext();
-            if (!sessionContext?.userToken) {
-                throw new Error("No userToken found in session context. Multi-user mode requires authentication.");
-            }
-
-            const connection = this.clientsByToken.get(sessionContext.userToken);
-            if (!connection) {
-                throw new Error(PluginBridge.MULTIUSER_CONNECTION_ERROR_MESSAGE);
-            }
-
-            return connection;
-        } else {
-            // single-user mode: return the single connected client
-            if (this.connectedClients.size === 0) {
-                throw new Error(
-                    `No Penpot plugin instances are currently connected. Please ensure the plugin is running and connected.`
-                );
-            }
-            if (this.connectedClients.size > 1) {
-                throw new Error(
-                    `Multiple (${this.connectedClients.size}) Penpot MCP Plugin instances are connected. ` +
-                        `Ask the user to ensure that only one instance is connected at a time.`
-                );
-            }
-
-            // return the first (and only) connection
-            const connection = this.connectedClients.values().next().value;
-            return <ClientConnection>connection;
+    private getLocalConnections(userToken: string | null): ClientConnection[] {
+        const connections = [...this.connectedClients.values()];
+        if (!this.mcpServer.isMultiUserMode()) {
+            return connections;
         }
+        return connections.filter((connection) => connection.userToken === userToken);
     }
 
     /**
-     * Executes a plugin task by sending it to the connected Penpot plugin instance,
-     * either directly via WebSocket or indirectly via Redis (depending on the configuration),
-     * and awaiting the result.
+     * Retrieves the user token of the current session.
+     *
+     * @returns The token in multi-user mode, null in single-user mode
+     * @throws Error if the session has no token in multi-user mode
+     */
+    private getSessionUserToken(): string | null {
+        if (!this.mcpServer.isMultiUserMode()) {
+            return null;
+        }
+        const userToken = this.mcpServer.getSessionContext()?.userToken;
+        if (!userToken) {
+            throw new Error("No userToken found in session context. Multi-user mode requires authentication.");
+        }
+        return userToken;
+    }
+
+    private createSelector(): PluginConnectionSelector {
+        return new PluginConnectionSelector(
+            this.mcpServer.isMultiUserMode()
+                ? PluginBridge.MULTIUSER_CONNECTION_ERROR_MESSAGE
+                : PluginBridge.NO_CONNECTION_ERROR_MESSAGE
+        );
+    }
+
+    /**
+     * Lists the Penpot files connected for the current session's user.
+     */
+    public async listConnectedFiles(): Promise<ConnectedFileSummary[]> {
+        return this.createSelector().summarize(this.getLocalConnections(this.getSessionUserToken()));
+    }
+
+    /**
+     * Executes a plugin task in the Penpot file given by the target, either directly via
+     * WebSocket or indirectly via Redis (depending on the configuration), and awaits the result.
      *
      * @param task - The plugin task to execute
-     * @throws Error if no plugin instances are connected or available
+     * @param target - The file in which to run the task
+     * @throws Error if no suitable plugin connection is available
      */
     public async executePluginTask<TResult extends PluginTaskResult<any>>(
-        task: PluginTask<any, TResult>
+        task: PluginTask<any, TResult>,
+        target: PluginTaskTarget = {}
     ): Promise<TResult> {
-        this.sendPluginTask(task, this.redisBridge !== undefined);
+        const userToken = this.getSessionUserToken();
+        if (this.redisBridge) {
+            this.sendPluginTaskViaRedis(task, userToken!);
+        } else {
+            const connection = this.createSelector().select(this.getLocalConnections(userToken), target.fileId);
+            this.sendPluginTask(task, connection);
+        }
         return await task.getResultPromise();
     }
 
     /**
-     * Registers a task for response correlation, sends its request over the appropriate
-     * transport, and arms a timeout that rejects the task if no response is received.
-     *
-     * The response (whether arriving over the local WebSocket or over Redis) is later
-     * matched by ID in {@link handlePluginTaskResponse}, which settles the task via its
-     * `resolveWithResult`/`rejectWithError` methods. The same correlation and timeout
-     * handling therefore applies regardless of the transport.
-     *
-     * When routing via Redis, the task is rejected immediately (rather than timing out)
-     * if the published request reached no instance, i.e. if no instance holds a plugin
-     * connection for the session's user token, or if publishing fails outright.
+     * Registers a task for response correlation and sends it over a local plugin connection.
      *
      * @param task - The task to dispatch
-     * @param useRedis - Whether to route the request via Redis (multi-instance) rather
-     *   than directly over the local WebSocket connection
-     * @param connection - The connection to use for a local (non-remote) dispatch; when
-     *   omitted, the session's connection is resolved via {@link getClientConnection}.
-     *   Ignored when `useRedis` is true.
-     * @throws Error if a local dispatch is required but no suitable connection is available
+     * @param connection - The connection to send the task over
+     * @throws Error if the connection is closed or its plugin cannot run tasks
      */
-    private sendPluginTask(task: AbstractPluginTask<any, any>, useRedis: boolean, connection?: ClientConnection): void {
-        let onTimeout: (() => void) | undefined;
-
-        if (useRedis) {
-            const sessionContext = this.mcpServer.getSessionContext();
-            if (!sessionContext?.userToken) {
-                throw new Error("No userToken found in session context. Multi-user mode requires authentication.");
-            }
-            const userToken = sessionContext.userToken;
-            const redisBridge = this.redisBridge!;
-            this.logger.debug("Dispatching task %s via Redis", task.id);
-
-            // register the task for result correlation, then publish the request via Redis
-            this.pendingTasks.set(task.id, task);
-            void redisBridge
-                .sendTaskRequest(userToken, task.toRequest(), (response) => this.handlePluginTaskResponse(response))
-                .then((receiverCount) => {
-                    // fail fast when no instance received the request (no connection with matching user token in any instance)
-                    if (receiverCount === 0) {
-                        this.rejectPendingTask(task.id, new Error(PluginBridge.MULTIUSER_CONNECTION_ERROR_MESSAGE));
-                    }
-                })
-                .catch((error) => {
-                    this.rejectPendingTask(task.id, error instanceof Error ? error : new Error(String(error)));
-                });
-
-            // on timeout, release the response-channel subscription, since no response
-            // will arrive to trigger its self-unsubscribe.
-            onTimeout = () => void redisBridge.unsubscribeFromResponse(task.id);
-        } else {
-            const target = connection ?? this.getClientConnection();
-            if (target.socket.readyState !== 1) {
-                // WebSocket is not open
-                throw new Error(`Plugin instance is disconnected. Task could not be sent.`);
-            }
-
-            // the socket can be open while browser-throttled plugin JS cannot run tasks
-            assertPluginResponsive(target, Date.now());
-
-            // register the task for result correlation, then send over the socket
-            this.pendingTasks.set(task.id, task);
-            target.socket.send(JSON.stringify(task.toRequest()));
+    private sendPluginTask(task: AbstractPluginTask<any, any>, connection: ClientConnection): void {
+        if (connection.socket.readyState !== WebSocket.OPEN) {
+            throw new Error(`Plugin instance is disconnected. Task could not be sent.`);
         }
 
-        // Set up a timeout to reject the task if no response is received
+        // the socket can be open while browser-throttled plugin JS cannot run tasks
+        assertPluginResponsive(connection, Date.now());
+
+        this.pendingTasks.set(task.id, task);
+        connection.socket.send(JSON.stringify(task.toRequest()));
+        this.armTimeout(task);
+        this.logger.info(`Sent task ${task.id} to connection ${connection.connectionId}`);
+    }
+
+    /**
+     * Registers a task for response correlation and publishes it via Redis to the instance
+     * holding the user's plugin connection.
+     *
+     * The task is rejected immediately (rather than timing out) if the request reached no
+     * instance or if publishing fails.
+     *
+     * @param task - The task to dispatch
+     * @param userToken - The user token whose plugin shall run the task
+     */
+    private sendPluginTaskViaRedis(task: AbstractPluginTask<any, any>, userToken: string): void {
+        const redisBridge = this.redisBridge!;
+        this.logger.debug("Dispatching task %s via Redis", task.id);
+
+        this.pendingTasks.set(task.id, task);
+        void redisBridge
+            .sendTaskRequest(userToken, task.toRequest(), (response) => this.handlePluginTaskResponse(response))
+            .then((receiverCount) => {
+                // fail fast when no instance holds a connection with the user token
+                if (receiverCount === 0) {
+                    this.rejectPendingTask(task.id, new Error(PluginBridge.MULTIUSER_CONNECTION_ERROR_MESSAGE));
+                }
+            })
+            .catch((error) => {
+                this.rejectPendingTask(task.id, error instanceof Error ? error : new Error(String(error)));
+            });
+
+        // on timeout, release the response-channel subscription, since no response
+        // will arrive to trigger its self-unsubscribe
+        this.armTimeout(task, () => void redisBridge.unsubscribeFromResponse(task.id));
+        this.logger.info(`Sent task ${task.id} via Redis`);
+    }
+
+    /**
+     * Arms a timeout that rejects the task if no response is received in time.
+     *
+     * @param task - The pending task
+     * @param onTimeout - Optional cleanup to run if the timeout rejects the task
+     */
+    private armTimeout(task: AbstractPluginTask<any, any>, onTimeout?: () => void): void {
         const timeoutHandle = setTimeout(() => {
-            if (
-                this.rejectPendingTask(
-                    task.id,
-                    new Error(`Task ${task.id} timed out after ${this.taskTimeoutSecs} seconds`)
-                )
-            ) {
+            const error = new Error(`Task ${task.id} timed out after ${this.taskTimeoutSecs} seconds`);
+            if (this.rejectPendingTask(task.id, error)) {
                 onTimeout?.();
             }
         }, this.taskTimeoutSecs * 1000);
-
         this.taskTimeouts.set(task.id, timeoutHandle);
-        this.logger.info(`Sent task ${task.id}`);
     }
 
     /**
      * Dispatches a task request received over Redis to the locally-connected plugin.
      *
-     * Invoked on the instance subscribed to a user token's request channel when another
-     * instance (or this one) issues a task request. A {@link RemotePluginTask} is created
-     * so that, once the plugin responds, the outcome is published back to the issuing
-     * instance's Redis response channel via the standard response-handling path.
+     * A {@link RemotePluginTask} publishes the plugin's response back to the issuing
+     * instance's Redis response channel. On failure to dispatch, an error response is
+     * published immediately so the requester need not wait for its timeout.
      *
-     * On failure to dispatch (e.g. the plugin is not connected here), an error response
-     * is published immediately so the requester need not wait for its timeout.
-     *
-     * @param userToken - The user token on whose request channel the request arrived;
-     *   identifies the locally-connected plugin to dispatch to
+     * @param userToken - The user token on whose request channel the request arrived
      * @param request - The serialized task request, passed through from Redis
      */
     private dispatchForwardedTask(userToken: string, request: PluginTaskRequest): void {
@@ -406,27 +449,32 @@ export class PluginBridge {
             return;
         }
 
-        // The response is published on the channel keyed by the original request ID.
+        // the response is published on the channel keyed by the original request ID
         const task = new RemotePluginTask(request.task, request.params, this.redisBridge, request.id);
         this.logger.debug("Dispatching remote task %s as %s to Penpot via WebSocket", request.id, task.id);
 
-        const connection = this.clientsByToken.get(userToken);
+        const connection = this.getLocalConnections(userToken)[0];
         if (!connection) {
             task.rejectWithError(new Error("Plugin not connected on the receiving instance"));
             return;
         }
 
         try {
-            this.sendPluginTask(task, false, connection);
+            this.sendPluginTask(task, connection);
         } catch (error) {
             task.rejectWithError(error instanceof Error ? error : new Error(String(error)));
         }
     }
 
     /**
-     * Closes the WebSocket server and all connected client sockets.
+     * Closes all plugin connections and the WebSocket server.
      */
     public async close(): Promise<void> {
+        // ws does not end open client sockets on server close, and the close callback waits for them
+        for (const ws of [...this.connectedClients.keys()]) {
+            this.removeConnection(ws);
+            ws.terminate();
+        }
         return new Promise((resolve) => {
             this.wsServer.close(() => {
                 this.logger.info("WebSocket server closed");
