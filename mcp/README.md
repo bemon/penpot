@@ -145,6 +145,19 @@ This bootstrap command will:
 > **Settings → Performance → Always keep these sites active** or pin the tab to reduce
 > tab deactivation.
 
+#### Working with several files
+
+You can connect several Penpot files at the same time, also from different projects.
+Open each file in its own browser tab and connect the plugin in each tab.
+All files share one MCP server and one MCP client configuration.
+
+Agents call `list_connected_files` to see the connected files and pass a file's `fileId`
+to `execute_code`, `export_shape` and `import_image`. With only one file connected,
+`fileId` may be left out. Each file keeps its own `storage` object.
+
+Background tabs are more likely to be frozen or unloaded by the browser, so follow the
+advice above on keeping Penpot tabs active.
+
 ### 3. Connect an MCP Client
 
 > [!IMPORTANT]  

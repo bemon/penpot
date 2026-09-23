@@ -74,8 +74,8 @@ There are three key pieces:
 Some important concepts for users:
 * **Integrations page**: MCP is configured under **Your account → Integrations → MCP Server**. Here you enable or disable MCP, get the server URL and manage the MCP key.
 * **MCP key**: a personal, non-recoverable token that authenticates your AI client with the MCP server. Only one key can exist per user at a time. This is used by the remote MCP setup.
-* **Currently focused page**: MCP always operates on the page you have in focus in Penpot. If you change the focused page (even in another browser window), the MCP context follows that page.
-* **Active MCP tab**: MCP can only be active in one browser tab at a time. If you have Penpot open in several tabs, you choose explicitly which one owns MCP before running agents.
+* **Currently focused page**: for each connected file, MCP operates on the page in focus in that file's tab. If you change the focused page, the MCP context for that file follows it.
+* **Connected files**: every Penpot tab with MCP connected makes its file available to your agents. With several files connected, agents list them with `list_connected_files` and name the file in each tool call, so they can work on files from different projects at the same time.
 
 ### Tools and capabilities
 
@@ -84,6 +84,7 @@ The Penpot MCP server exposes tools for reading and writing to design files. For
 Current tools in **local MCP**:
 
 * `execute_code`
+* `list_connected_files`
 * `high_level_overview`
 * `penpot_api_info`
 * `export_shape`
@@ -313,7 +314,7 @@ Once everything is configured, day-to-day use of Penpot MCP follows a simple pat
 3. **Run prompts**:
    * Open your MCP client and start with read-only prompts first (`list`, `inspect`, `analyze`), then continue with write actions.
 
-MCP always acts on the **currently focused page** in the active Penpot tab.
+MCP acts on the **currently focused page** in the tab of each connected file.
 
 #### Manage
 
@@ -420,7 +421,7 @@ Once everything is configured, day-to-day use of Penpot MCP follows a simple pat
 
    Open your MCP client and start with read-only prompts first (`list`, `inspect`, `analyze`), then continue with write actions.
 
-MCP always acts on the **currently focused page** in the active Penpot tab.
+MCP acts on the **currently focused page** in the tab of each connected file.
 
 #### Manage
 
