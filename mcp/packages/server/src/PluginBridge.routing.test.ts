@@ -8,7 +8,7 @@ import { PenpotMcpServer } from "./PenpotMcpServer";
 import { HEARTBEAT_STALE_THRESHOLD_MS } from "./PluginLiveness";
 import { ExecuteCodePluginTask } from "./tasks/ExecuteCodePluginTask";
 
-let nextPort = 17_500;
+let nextPort = 19_500;
 let server: PenpotMcpServer | undefined;
 let previousEnv: NodeJS.ProcessEnv;
 const sockets: WebSocket[] = [];
@@ -219,8 +219,8 @@ async function waitForStatus(fileId: string, status: string): Promise<void> {
 }
 
 test("keeps a throttled tab ready by answering server pings", async (t) => {
-    await startServer(false);
     t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+    await startServer(false);
     await connectThrottledPlugin(alpha, true);
     await waitUntilRegistered(1);
 
@@ -232,8 +232,8 @@ test("keeps a throttled tab ready by answering server pings", async (t) => {
 });
 
 test("rejects tasks for a tab that answers no pings", async (t) => {
-    await startServer(false);
     t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+    await startServer(false);
     await connectThrottledPlugin(alpha, false);
     await waitUntilRegistered(1);
 
