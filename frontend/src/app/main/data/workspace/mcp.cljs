@@ -12,6 +12,7 @@
    [app.common.uri :as u]
    [app.config :as cf]
    [app.main.broadcast :as mbc]
+   [app.main.data.helpers :as dsh]
    [app.main.data.plugins :as dp]
    [app.main.data.profile :as du]
    [app.main.data.workspace :as-alias dw]
@@ -49,8 +50,7 @@
   (ptk/reify ::connect-mcp
     ptk/WatchEvent
     (watch [_ _ _]
-      (rx/of (mbc/event :mcp/force-disconnect {})
-             (ptk/data-event ::connect)))))
+      (rx/of (ptk/data-event ::connect)))))
 
 (defn- start-reconnect-watcher
   []
@@ -96,20 +96,9 @@
   (ptk/reify ::update-mcp-plugin-connection
     ptk/UpdateEvent
     (update [_ state]
-      (update state :mcp assoc :connection-status value))
-
-    ptk/WatchEvent
-    (watch [_ _ _]
-      ;; Only one MCP plugin instance may be active across browser tabs.
-      ;; When this tab becomes connected, tell every other tab to
-      ;; disconnect (which also stops their reconnect watcher). Otherwise
-      ;; several tabs stay connected at once and the MCP server reports
-      ;; "multiple instances connected" and the agent fails.
-      (when (= "connected" value)
-        (rx/of (mbc/event :mcp/force-disconnect {}))))))
+      (update state :mcp assoc :connection-status value))))
 
 ;; This event will arrive when the user selects disconnect on the menu
-;; or there is a broadcast message for disconnection
 (defn user-disconnect-mcp
   []
   (ptk/reify ::user-disconnect-mcp
@@ -138,6 +127,15 @@
 
             extension #js {:getToken (constantly token)
                            :getServerUrl #(str cf/mcp-ws-uri)
+                           :getFileContext
+                           (fn []
+                             (let [state   @st/state
+                                   project (get-in state [:projects (:current-project-id state)])
+                                   team    (dsh/lookup-team state)]
+                               #js {:projectId   (some-> (:id project) str)
+                                    :projectName (:name project)
+                                    :teamId      (some-> (:id team) str)
+                                    :teamName    (:name team)}))
                            :setMcpStatus
                            (fn [status]
                              (when (= status "connected")
@@ -202,12 +200,10 @@
 
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [stopper-s  (rx/merge
-                        (rx/filter (ptk/type? ::dw/finalize-workspace) stream)
-                        (rx/filter (ptk/type? ::init) stream))
-
-            session-id (get state :session-id)
-            mcp-state  (get state :mcp)]
+      (let [stopper-s (rx/merge
+                       (rx/filter (ptk/type? ::dw/finalize-workspace) stream)
+                       (rx/filter (ptk/type? ::init) stream))
+            mcp-state (get state :mcp)]
 
         (->> (rx/merge
               (rx/of (du/fetch-access-tokens))
@@ -230,18 +226,10 @@
                 (rx/empty))
 
               (->> mbc/stream
-                   (rx/filter (mbc/type? :mcp/force-disconnect))
-                   (rx/filter (fn [{:keys [id]}]
-                                (not= session-id id)))
-                   (rx/map deref)
-                   (rx/map (fn [] (user-disconnect-mcp))))
-
-              (->> mbc/stream
                    (rx/filter (mbc/type? :mcp/enable))
                    (rx/mapcat (fn [_]
-                                ;; Re-init so the force-disconnect
-                                ;; listener is set up now that MCP
-                                ;; is enabled.
+                                ;; Re-init so the MCP plugin starts now
+                                ;; that MCP is enabled.
                                 (rx/of (update-mcp-status true)
                                        (init)))))
 
