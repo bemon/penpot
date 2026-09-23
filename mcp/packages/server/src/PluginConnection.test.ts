@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePluginFileInfo } from "./PluginConnection";
+import { parsePluginFileInfo, toConnectionDescriptor } from "./PluginConnection";
 
 test("parses a complete file descriptor", () => {
     const file = {
@@ -42,4 +42,23 @@ test("rejects a descriptor with an empty file ID", () => {
 test("rejects a value that is not an object", () => {
     assert.equal(parsePluginFileInfo("f1"), null);
     assert.equal(parsePluginFileInfo(null), null);
+});
+
+test("strips non-descriptor state from a connection", () => {
+    const connection = {
+        connectionId: "c1",
+        file: { fileId: "f1", fileName: "Landing page" },
+        connectedAt: 1,
+        lastHeartbeat: 2,
+        frozen: false,
+        socket: {},
+        userToken: "secret",
+    };
+    assert.deepEqual(toConnectionDescriptor(connection), {
+        connectionId: "c1",
+        file: { fileId: "f1", fileName: "Landing page" },
+        connectedAt: 1,
+        lastHeartbeat: 2,
+        frozen: false,
+    });
 });

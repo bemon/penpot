@@ -55,3 +55,13 @@ export function parsePluginFileInfo(value: unknown): PluginFileInfo | null {
     }
     return info;
 }
+
+/**
+ * Copies the descriptor fields of a connection, dropping further state such as its socket.
+ *
+ * @param connection - The connection to describe
+ */
+export function toConnectionDescriptor(connection: PluginConnectionDescriptor): PluginConnectionDescriptor {
+    const { connectionId, file, connectedAt, lastHeartbeat, frozen } = connection;
+    return { connectionId, file, connectedAt, lastHeartbeat, frozen };
+}
