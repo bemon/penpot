@@ -248,6 +248,11 @@ function connectToMcpServer(baseUrl?: string, token?: string): void {
             try {
                 console.log("Received from MCP server:", event.data);
                 const request = JSON.parse(event.data);
+                // the server paces heartbeats, since browsers throttle timers in background tabs
+                if (request.type === "ping") {
+                    sendHeartbeat();
+                    return;
+                }
                 // Track the current task received from the MCP server
                 if (request.task) {
                     updateCurrentTask(request.task);

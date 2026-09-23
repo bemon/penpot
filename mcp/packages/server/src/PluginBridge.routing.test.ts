@@ -5,6 +5,7 @@ import { WebSocket } from "ws";
 import type { PluginFileInfo, PluginTaskRequest } from "@penpot/mcp-common";
 import { MAX_CONNECTIONS_PER_USER } from "./PluginBridge";
 import { PenpotMcpServer } from "./PenpotMcpServer";
+import { HEARTBEAT_STALE_THRESHOLD_MS } from "./PluginLiveness";
 import { ExecuteCodePluginTask } from "./tasks/ExecuteCodePluginTask";
 
 let nextPort = 17_500;
@@ -184,4 +185,60 @@ test("stopping the server disconnects connected plugins", { timeout: 10_000 }, a
     server = undefined;
 
     await closed;
+});
+
+/**
+ * Connects a fake plugin that sends no heartbeats of its own, like a tab whose timers the browser throttles.
+ */
+async function connectThrottledPlugin(file: PluginFileInfo, answersPings: boolean): Promise<WebSocket> {
+    const socket = openSocket();
+    socket.on("message", (raw) => {
+        const message = JSON.parse(raw.toString());
+        if (message.type === "ping") {
+            if (answersPings) {
+                socket.send(JSON.stringify({ type: "heartbeat" }));
+            }
+            return;
+        }
+        socket.send(JSON.stringify({ id: message.id, success: true, data: { result: file.fileId, log: "" } }));
+    });
+    await once(socket, "open");
+    socket.send(JSON.stringify({ type: "register", file }));
+    return socket;
+}
+
+async function waitForStatus(fileId: string, status: string): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt++) {
+        const files = await server!.runWithSessionContext({}, () => server!.pluginBridge.listConnectedFiles());
+        if (files.find((file) => file.fileId === fileId)?.status === status) {
+            return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`file ${fileId} did not reach status ${status}`);
+}
+
+test("keeps a throttled tab ready by answering server pings", async (t) => {
+    await startServer(false);
+    t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+    await connectThrottledPlugin(alpha, true);
+    await waitUntilRegistered(1);
+
+    t.mock.timers.tick(HEARTBEAT_STALE_THRESHOLD_MS + 5_000);
+    await waitForStatus("alpha", "ready");
+
+    const result = await runCode("alpha");
+    assert.equal(result.data?.result, "alpha");
+});
+
+test("rejects tasks for a tab that answers no pings", async (t) => {
+    await startServer(false);
+    t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+    await connectThrottledPlugin(alpha, false);
+    await waitUntilRegistered(1);
+
+    t.mock.timers.tick(HEARTBEAT_STALE_THRESHOLD_MS + 5_000);
+    await waitForStatus("alpha", "stale");
+
+    await assert.rejects(runCode("alpha"), /appears to be suspended by the browser/);
 });
