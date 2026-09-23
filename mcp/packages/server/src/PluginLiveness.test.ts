@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertPluginResponsive, HEARTBEAT_STALE_THRESHOLD_MS } from "./PluginBridge";
+import { assertPluginResponsive, getPluginStatus, HEARTBEAT_STALE_THRESHOLD_MS } from "./PluginLiveness";
 
 test("passes for a responsive connection with a recent heartbeat", () => {
     const now = 1_000_000;
@@ -42,4 +42,26 @@ test("honours a custom stale threshold", () => {
         () => assertPluginResponsive({ frozen: false, lastHeartbeat }, now, 1_000),
         /appears to be suspended by the browser/
     );
+});
+
+test("reports a connection with a recent heartbeat as ready", () => {
+    const now = 1_000_000;
+    assert.equal(getPluginStatus({ frozen: false, lastHeartbeat: now - 5_000 }, now), "ready");
+});
+
+test("reports a connection whose heartbeat is exactly at the threshold as ready", () => {
+    const now = 1_000_000;
+    const lastHeartbeat = now - HEARTBEAT_STALE_THRESHOLD_MS;
+    assert.equal(getPluginStatus({ frozen: false, lastHeartbeat }, now), "ready");
+});
+
+test("reports a connection without a heartbeat within the threshold as stale", () => {
+    const now = 1_000_000;
+    const lastHeartbeat = now - (HEARTBEAT_STALE_THRESHOLD_MS + 1);
+    assert.equal(getPluginStatus({ frozen: false, lastHeartbeat }, now), "stale");
+});
+
+test("reports a frozen tab as frozen even with a recent heartbeat", () => {
+    const now = 1_000_000;
+    assert.equal(getPluginStatus({ frozen: true, lastHeartbeat: now }, now), "frozen");
 });
