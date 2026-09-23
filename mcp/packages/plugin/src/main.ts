@@ -1,4 +1,5 @@
 import "./style.css";
+import type { PluginFileInfo, PluginRegisterMessage } from "../../common/src";
 
 /**
  * the maximum allowed size for task responses sent back to the MCP server in the integrated remote MCP mode.
@@ -35,6 +36,9 @@ let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
  * set via the "mcp-mode" message sent by plugin.ts on initialization
  */
 let isIntegratedRemoteMcp = false;
+
+/** descriptor of the file this plugin instance operates on, as last reported by plugin.ts */
+let currentFileInfo: PluginFileInfo | null = null;
 
 const statusPill = document.getElementById("connection-status") as HTMLElement;
 const statusText = document.getElementById("status-text") as HTMLElement;
@@ -131,6 +135,16 @@ function sendTaskResponse(response: any): void {
 }
 
 /**
+ * Reports the current file to the MCP server, which routes tasks for that file to this plugin instance.
+ */
+function sendRegistration(): void {
+    if (currentFileInfo && ws?.readyState === WebSocket.OPEN) {
+        const message: PluginRegisterMessage = { type: "register", file: currentFileInfo };
+        ws.send(JSON.stringify(message));
+    }
+}
+
+/**
  * Emits a liveness signal from the plugin event loop.
  *
  * WebSocket ping/pong is not enough here: browsers can answer protocol pings while
@@ -221,6 +235,7 @@ function connectToMcpServer(baseUrl?: string, token?: string): void {
         ws.onopen = () => {
             cancelReconnect();
             startHeartbeat();
+            sendRegistration();
             setTimeout(() => {
                 if (ws) {
                     console.log("Connected to MCP server");
@@ -302,6 +317,10 @@ disconnectBtn?.addEventListener("click", () => {
 window.addEventListener("message", (event) => {
     if (event.data.type === "mcp-mode") {
         isIntegratedRemoteMcp = event.data.integratedRemoteMcp;
+    }
+    if (event.data.type === "file-info") {
+        currentFileInfo = event.data.file;
+        sendRegistration();
     }
     if (event.data.type === "start-server") {
         connectToMcpServer(event.data.url, event.data.token);
