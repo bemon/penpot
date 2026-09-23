@@ -9926,6 +9926,11 @@ msgstr "No actualizar"
 msgid "workspace.tokens.num-active-sets"
 msgstr "%s sets activos"
 
+msgid "workspace.tokens.only-first-fill-or-stroke"
+msgstr ""
+"Los tokens de diseño solo se pueden aplicar al primer relleno o trazo de la "
+"lista."
+
 #: src/app/main/ui/workspace/tokens/management/token_pill.cljs:122
 #, fuzzy
 msgid "workspace.tokens.original-value"

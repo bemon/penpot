@@ -10224,6 +10224,10 @@ msgstr "Don't remap"
 msgid "workspace.tokens.num-active-sets"
 msgstr "%s active sets"
 
+#: src/app/main/ui/workspace/sidebar/options/rows/color_row.cljs:178, src/app/main/ui/workspace/sidebar/options/rows/color_row.cljs:184, src/app/main/ui/workspace/sidebar/options/rows/color_row.cljs:198, src/app/main/ui/workspace/sidebar/options/rows/color_row.cljs:200, src/app/main/ui/workspace/sidebar/options/rows/color_row.cljs:207, src/app/main/ui/workspace/sidebar/options/rows/color_row.cljs:209, src/app/main/ui/workspace/sidebar/options/rows/stroke_row.cljs:408, src/app/main/ui/workspace/sidebar/options/rows/stroke_row.cljs:497, src/app/main/ui/workspace/sidebar/options/rows/stroke_row.cljs:512, src/app/main/ui/workspace/sidebar/options/rows/stroke_row.cljs:527, src/app/main/ui/workspace/sidebar/options/rows/stroke_row.cljs:542
+msgid "workspace.tokens.only-first-fill-or-stroke"
+msgstr "Design tokens can only be applied to the first fill or stroke in the list."
+
 #: src/app/main/ui/workspace/tokens/management/token_pill.cljs:122
 #, fuzzy
 msgid "workspace.tokens.original-value"
