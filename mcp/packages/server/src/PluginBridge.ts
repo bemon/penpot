@@ -6,7 +6,7 @@ import { RemotePluginTask } from "./RemotePluginTask";
 import { PluginTaskRequest, PluginTaskResponse, PluginTaskResult } from "@penpot/mcp-common";
 import { createLogger } from "./logger";
 import { assertPluginResponsive } from "./PluginLiveness";
-import { parsePluginFileInfo, PluginConnectionDescriptor } from "./PluginConnection";
+import { parsePluginFileInfo, PluginConnectionDescriptor, toConnectionDescriptor } from "./PluginConnection";
 import { ConnectedFileSummary, PluginConnectionSelector } from "./PluginConnectionSelector";
 import type { PenpotMcpServer } from "./PenpotMcpServer";
 import type { RedisBridge } from "./RedisBridge";
@@ -23,6 +23,16 @@ const HEARTBEAT_REQUEST_INTERVAL_MS = 10_000;
  * Maximum number of simultaneous plugin connections (browser tabs) per user token in multi-user mode.
  */
 export const MAX_CONNECTIONS_PER_USER = 20;
+
+/**
+ * Interval at which local connections are republished to the shared registry (multi-instance mode).
+ */
+const REGISTRY_REFRESH_INTERVAL_MS = 10_000;
+
+/**
+ * Lifetime of a shared registry entry; entries of a crashed instance disappear after it.
+ */
+const REGISTRY_ENTRY_TTL_MS = 3 * REGISTRY_REFRESH_INTERVAL_MS;
 
 interface ClientConnection extends PluginConnectionDescriptor {
     socket: WebSocket;
@@ -59,6 +69,7 @@ export class PluginBridge {
     private readonly connectedClients: Map<WebSocket, ClientConnection> = new Map();
     private readonly pendingTasks: Map<string, AbstractPluginTask<any, any>> = new Map();
     private readonly taskTimeouts: Map<string, NodeJS.Timeout> = new Map();
+    private readonly registryRefreshTimer?: NodeJS.Timeout;
 
     /**
      * Creates the plugin bridge and starts its WebSocket server.
@@ -80,6 +91,9 @@ export class PluginBridge {
     ) {
         this.wsServer = new WebSocketServer({ port: port, host: mcpServer.host });
         this.setupWebSocketHandlers();
+        if (redisBridge) {
+            this.registryRefreshTimer = setInterval(() => this.refreshRegistry(), REGISTRY_REFRESH_INTERVAL_MS);
+        }
     }
 
     /**
@@ -128,12 +142,15 @@ export class PluginBridge {
                 userToken !== null
             );
 
-            // In multi-instance mode, subscribe to this token's Redis request channel so
-            // that task requests issued by other instances are dispatched to this plugin.
+            // In multi-instance mode, subscribe to this connection's Redis request channel and
+            // publish the connection, so that other instances can route tasks to it.
             if (userToken && this.redisBridge) {
                 this.redisBridge
-                    .subscribeToTasks(userToken, (request) => this.dispatchForwardedTask(userToken, request))
+                    .subscribeToTasks(userToken, connection.connectionId, (request) =>
+                        this.dispatchForwardedTask(connection, request)
+                    )
                     .catch((error) => this.logger.error(error, "Failed to subscribe to Redis task channel"));
+                this.publishToRegistry(connection);
             }
 
             ws.on("message", (data: Buffer) => this.handlePluginMessage(connection, data));
@@ -162,13 +179,7 @@ export class PluginBridge {
         if (!this.mcpServer.isMultiUserMode()) {
             return null;
         }
-        const existingCount = this.getLocalConnections(userToken).length;
-        // Redis request channels are keyed by token alone, so a second connection
-        // would also receive the first one's tasks
-        if (this.redisBridge && existingCount > 0) {
-            return "Duplicate connection for given user token; close previous connection first.";
-        }
-        if (existingCount >= MAX_CONNECTIONS_PER_USER) {
+        if (this.getLocalConnections(userToken).length >= MAX_CONNECTIONS_PER_USER) {
             return `Too many plugin connections for this user (maximum: ${MAX_CONNECTIONS_PER_USER}).`;
         }
         return null;
@@ -190,14 +201,19 @@ export class PluginBridge {
             if (message?.type === "freeze") {
                 connection.frozen = true;
                 this.logger.info("Plugin tab reported it is being frozen by the browser");
+                this.publishToRegistry(connection);
                 return;
             }
-            connection.frozen = false;
+            if (connection.frozen) {
+                connection.frozen = false;
+                this.publishToRegistry(connection);
+            }
             if (message?.type === "heartbeat") {
                 return;
             }
             if (message?.type === "register") {
                 this.registerFile(connection, message.file);
+                this.publishToRegistry(connection);
                 return;
             }
             this.handlePluginTaskResponse(message as PluginTaskResponse<any>);
@@ -237,9 +253,36 @@ export class PluginBridge {
         clearInterval(connection.pingInterval);
         this.connectedClients.delete(ws);
         if (connection.userToken && this.redisBridge) {
+            const { userToken, connectionId } = connection;
             this.redisBridge
-                .unsubscribeFromTasks(connection.userToken)
+                .unsubscribeFromTasks(userToken, connectionId)
                 .catch((error) => this.logger.error(error, "Failed to unsubscribe from Redis task channel"));
+            this.redisBridge
+                .unregisterConnection(userToken, connectionId)
+                .catch((error) => this.logger.error(error, "Failed to remove plugin connection from Redis registry"));
+        }
+    }
+
+    /**
+     * Publishes a local connection to the shared registry (multi-instance mode only).
+     *
+     * @param connection - The connection to publish
+     */
+    private publishToRegistry(connection: ClientConnection): void {
+        if (!this.redisBridge || !connection.userToken) {
+            return;
+        }
+        this.redisBridge
+            .registerConnection(connection.userToken, toConnectionDescriptor(connection), REGISTRY_ENTRY_TTL_MS)
+            .catch((error) => this.logger.error(error, "Failed to publish plugin connection to Redis registry"));
+    }
+
+    /**
+     * Republishes all local connections, which keeps their registry entries from expiring.
+     */
+    private refreshRegistry(): void {
+        for (const connection of this.connectedClients.values()) {
+            this.publishToRegistry(connection);
         }
     }
 
@@ -348,7 +391,11 @@ export class PluginBridge {
      * Lists the Penpot files connected for the current session's user.
      */
     public async listConnectedFiles(): Promise<ConnectedFileSummary[]> {
-        return this.createSelector().summarize(this.getLocalConnections(this.getSessionUserToken()));
+        const userToken = this.getSessionUserToken();
+        const candidates: PluginConnectionDescriptor[] = this.redisBridge
+            ? await this.redisBridge.listConnections(userToken!)
+            : this.getLocalConnections(userToken);
+        return this.createSelector().summarize(candidates);
     }
 
     /**
@@ -365,7 +412,9 @@ export class PluginBridge {
     ): Promise<TResult> {
         const userToken = this.getSessionUserToken();
         if (this.redisBridge) {
-            this.sendPluginTaskViaRedis(task, userToken!);
+            const candidates = await this.redisBridge.listConnections(userToken!);
+            const connection = this.createSelector().select(candidates, target.fileId);
+            this.sendPluginTaskViaRedis(task, userToken!, connection.connectionId);
         } else {
             const connection = this.createSelector().select(this.getLocalConnections(userToken), target.fileId);
             this.sendPluginTask(task, connection);
@@ -396,25 +445,31 @@ export class PluginBridge {
 
     /**
      * Registers a task for response correlation and publishes it via Redis to the instance
-     * holding the user's plugin connection.
+     * holding the target plugin connection.
      *
-     * The task is rejected immediately (rather than timing out) if the request reached no
-     * instance or if publishing fails.
+     * The task is rejected immediately (rather than timing out) if the connection is no longer
+     * subscribed anywhere or if publishing fails.
      *
      * @param task - The task to dispatch
-     * @param userToken - The user token whose plugin shall run the task
+     * @param userToken - The user token owning the target connection
+     * @param connectionId - The ID of the target connection
      */
-    private sendPluginTaskViaRedis(task: AbstractPluginTask<any, any>, userToken: string): void {
+    private sendPluginTaskViaRedis(task: AbstractPluginTask<any, any>, userToken: string, connectionId: string): void {
         const redisBridge = this.redisBridge!;
-        this.logger.debug("Dispatching task %s via Redis", task.id);
+        this.logger.debug("Dispatching task %s via Redis to connection %s", task.id, connectionId);
 
         this.pendingTasks.set(task.id, task);
         void redisBridge
-            .sendTaskRequest(userToken, task.toRequest(), (response) => this.handlePluginTaskResponse(response))
+            .sendTaskRequest(userToken, connectionId, task.toRequest(), (response) =>
+                this.handlePluginTaskResponse(response)
+            )
             .then((receiverCount) => {
-                // fail fast when no instance holds a connection with the user token
+                // the registry can briefly list a connection that has already closed
                 if (receiverCount === 0) {
-                    this.rejectPendingTask(task.id, new Error(PluginBridge.MULTIUSER_CONNECTION_ERROR_MESSAGE));
+                    this.rejectPendingTask(
+                        task.id,
+                        new Error(`Plugin instance is disconnected. Task could not be sent.`)
+                    );
                 }
             })
             .catch((error) => {
@@ -444,16 +499,16 @@ export class PluginBridge {
     }
 
     /**
-     * Dispatches a task request received over Redis to the locally-connected plugin.
+     * Dispatches a task request received over Redis to a locally-connected plugin.
      *
      * A {@link RemotePluginTask} publishes the plugin's response back to the issuing
      * instance's Redis response channel. On failure to dispatch, an error response is
      * published immediately so the requester need not wait for its timeout.
      *
-     * @param userToken - The user token on whose request channel the request arrived
+     * @param connection - The connection on whose request channel the request arrived
      * @param request - The serialized task request, passed through from Redis
      */
-    private dispatchForwardedTask(userToken: string, request: PluginTaskRequest): void {
+    private dispatchForwardedTask(connection: ClientConnection, request: PluginTaskRequest): void {
         if (!this.redisBridge) {
             return;
         }
@@ -461,12 +516,6 @@ export class PluginBridge {
         // the response is published on the channel keyed by the original request ID
         const task = new RemotePluginTask(request.task, request.params, this.redisBridge, request.id);
         this.logger.debug("Dispatching remote task %s as %s to Penpot via WebSocket", request.id, task.id);
-
-        const connection = this.getLocalConnections(userToken)[0];
-        if (!connection) {
-            task.rejectWithError(new Error("Plugin not connected on the receiving instance"));
-            return;
-        }
 
         try {
             this.sendPluginTask(task, connection);
@@ -479,6 +528,7 @@ export class PluginBridge {
      * Closes all plugin connections and the WebSocket server.
      */
     public async close(): Promise<void> {
+        clearInterval(this.registryRefreshTimer);
         // ws does not end open client sockets on server close, and the close callback waits for them
         for (const ws of [...this.connectedClients.keys()]) {
             this.removeConnection(ws);
