@@ -4,61 +4,16 @@ import { AbstractPluginTask, PluginTask } from "./PluginTask";
 import { RemotePluginTask } from "./RemotePluginTask";
 import { PluginTaskRequest, PluginTaskResponse, PluginTaskResult } from "@penpot/mcp-common";
 import { createLogger } from "./logger";
+import { assertPluginResponsive, PluginLivenessState } from "./PluginLiveness";
 import type { PenpotMcpServer } from "./PenpotMcpServer";
 import type { RedisBridge } from "./RedisBridge";
 
 const KEEP_ALIVE_TIME = 30000; // 30 seconds
 
-/**
- * Maximum plugin heartbeat age before a connection is stale.
- *
- * This uses plugin heartbeats rather than WebSocket pongs because the browser can answer
- * protocol pings while the tab's JavaScript event loop is frozen.
- */
-export const HEARTBEAT_STALE_THRESHOLD_MS = 30000;
-
-/**
- * Observable liveness state of a plugin connection.
- */
-export interface PluginLivenessState {
-    /** timestamp of the last plugin message, in ms since epoch. */
-    lastHeartbeat: number;
-    /** whether the plugin reported a browser freeze. */
-    frozen: boolean;
-}
-
 interface ClientConnection extends PluginLivenessState {
     socket: WebSocket;
     userToken: string | null;
     pingInterval: NodeJS.Timeout;
-}
-
-/**
- * Throws if the plugin tab cannot currently run tasks.
- *
- * A socket can stay open while the page event loop is paused, so task dispatch must check
- * plugin-level liveness before sending work.
- */
-export function assertPluginResponsive(
-    state: PluginLivenessState,
-    now: number,
-    staleThresholdMs: number = HEARTBEAT_STALE_THRESHOLD_MS
-): void {
-    if (state.frozen) {
-        throw new Error(
-            `The Penpot plugin tab has been frozen by the browser and cannot run tasks. ` +
-                `Please click/focus the Penpot tab to wake it, then retry.`
-        );
-    }
-
-    const heartbeatAge = now - state.lastHeartbeat;
-    if (heartbeatAge > staleThresholdMs) {
-        throw new Error(
-            `The Penpot plugin tab appears to be suspended by the browser (no heartbeat for ` +
-                `${Math.round(heartbeatAge / 1000)}s). Please click/focus the Penpot tab to wake it, ` +
-                `then retry.`
-        );
-    }
 }
 
 /**
