@@ -1,6 +1,7 @@
 import { ExecuteCodeTaskHandler } from "./task-handlers/ExecuteCodeTaskHandler";
 import { Task, TaskHandler } from "./TaskHandler";
 import { formatTaskError } from "./ErrorUtils";
+import { buildFileInfo } from "./FileInfo";
 
 /**
  * indicates whether the plugin is running in an environment with the Penpot-integrated remote MCP server
@@ -17,6 +18,16 @@ const isIntegratedRemoteMcp = !!mcp;
 function extractVersionPrefix(version: string): string {
     const match = version.match(/^(\d+\.\d+\.\d+)/);
     return match ? match[1] : version;
+}
+
+/**
+ * Sends the descriptor of the current file to the UI, which reports it to the MCP server.
+ */
+function sendFileInfo(): void {
+    penpot.ui.sendMessage({
+        type: "file-info",
+        file: buildFileInfo(penpot.currentFile, mcp?.getFileContext?.()),
+    });
 }
 
 mcp?.setMcpStatus("connecting");
@@ -41,6 +52,7 @@ penpot.ui.onMessage<string | { id: string; type?: string; status?: string; task:
             type: "mcp-mode",
             integratedRemoteMcp: isIntegratedRemoteMcp,
         });
+        sendFileInfo();
         // Check Penpot version compatibility
         const penpotVersionPrefix = penpot.version ? extractVersionPrefix(penpot.version) : "<2.15"; // pre-2.15 versions don't have version info
         const mcpVersionPrefix = extractVersionPrefix(PENPOT_MCP_VERSION);
@@ -120,6 +132,9 @@ if (mcp) {
         });
     });
 }
+
+// report the new file when a different file is opened in this tab
+penpot.on("filechange", () => sendFileInfo());
 
 // Handle theme change in the iframe
 penpot.on("themechange", (theme) => {
