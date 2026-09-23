@@ -269,6 +269,17 @@ export class PenpotMcpServer {
         return this.sessionContext.getStore();
     }
 
+    /**
+     * Runs the given function within the given session context.
+     *
+     * @param context - The session context to make available to {@link getSessionContext}
+     * @param fn - The function to run
+     * @returns The function's result
+     */
+    public runWithSessionContext<T>(context: SessionContext, fn: () => T): T {
+        return this.sessionContext.run(context, fn);
+    }
+
     private initTools(): ToolInfo[] {
         const toolInstances: Tool<any>[] = [
             new ExecuteCodeTool(this),
