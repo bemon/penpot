@@ -83,3 +83,51 @@ export interface ExecuteCodeTaskResultData<T> {
      */
     log: string;
 }
+
+/**
+ * Descriptor of the Penpot file that a plugin instance operates on.
+ *
+ * Project and team details are only present when the plugin runs with the
+ * Penpot-integrated MCP extension.
+ */
+export interface PluginFileInfo {
+    /**
+     * The ID of the Penpot file.
+     */
+    fileId: string;
+
+    /**
+     * The name of the Penpot file.
+     */
+    fileName: string;
+
+    /**
+     * The ID of the project containing the file, if known.
+     */
+    projectId?: string;
+
+    /**
+     * The name of the project containing the file, if known.
+     */
+    projectName?: string;
+
+    /**
+     * The ID of the team owning the project, if known.
+     */
+    teamId?: string;
+
+    /**
+     * The name of the team owning the project, if known.
+     */
+    teamName?: string;
+}
+
+/**
+ * Message sent from plugin to server to announce the file the plugin operates on.
+ *
+ * Sent whenever the WebSocket opens and whenever the file changes.
+ */
+export interface PluginRegisterMessage {
+    type: "register";
+    file: PluginFileInfo;
+}
