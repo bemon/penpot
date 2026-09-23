@@ -11,7 +11,13 @@ import { ConnectedFileSummary, PluginConnectionSelector } from "./PluginConnecti
 import type { PenpotMcpServer } from "./PenpotMcpServer";
 import type { RedisBridge } from "./RedisBridge";
 
-const KEEP_ALIVE_TIME = 30000; // 30 seconds
+/**
+ * Interval at which the server asks each plugin for a heartbeat.
+ *
+ * The plugin answers from its socket message handler. Browsers throttle timers in background tabs,
+ * but not WebSocket message delivery, so the server sets the pace rather than the plugin's own timer.
+ */
+const HEARTBEAT_REQUEST_INTERVAL_MS = 10_000;
 
 /**
  * Maximum number of simultaneous plugin connections (browser tabs) per user token in multi-user mode.
@@ -110,7 +116,10 @@ export class PluginBridge {
                 frozen: false,
                 socket: ws,
                 userToken,
-                pingInterval: setInterval(() => ws.ping(), KEEP_ALIVE_TIME),
+                pingInterval: setInterval(() => {
+                    ws.ping();
+                    ws.send(JSON.stringify({ type: "ping" }));
+                }, HEARTBEAT_REQUEST_INTERVAL_MS),
             };
             this.connectedClients.set(ws, connection);
             this.logger.info(
