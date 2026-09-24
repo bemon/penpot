@@ -119,7 +119,10 @@
     (effect [_ _ stream]
       (let [manifest  (-> default-manifest
                           (assoc :url (str (u/join cf/public-uri "plugins/mcp/manifest.json")))
-                          (assoc :host (str (u/join cf/public-uri "plugins/mcp/"))))
+                          (assoc :host (str (u/join cf/public-uri "plugins/mcp/")))
+                          ;; /plugins is served without cache headers, so browsers
+                          ;; would otherwise keep running the code of an older build
+                          (assoc :code (str "plugin.js?version=" (or cf/version-tag (:full cf/version)))))
 
             stopper-s (rx/merge
                        (rx/filter (ptk/type? ::dw/finalize-workspace) stream)
