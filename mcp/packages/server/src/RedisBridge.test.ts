@@ -5,6 +5,7 @@ import { RedisBridge } from "./RedisBridge";
 const descriptor = {
     connectionId: "c1",
     file: { fileId: "f1", fileName: "Landing page" },
+    page: null,
     connectedAt: 1,
     lastHeartbeat: 2,
     frozen: false,

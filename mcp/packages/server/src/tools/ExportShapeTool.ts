@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FILE_ID_SCHEMA, Tool } from "../Tool";
+import { FILE_ID_SCHEMA, PAGE_ID_SCHEMA, Tool } from "../Tool";
 import { ImageContent, PNGResponse, TextContent, TextResponse, ToolResponse } from "../ToolResponse";
 import "reflect-metadata";
 import { PenpotMcpServer } from "../PenpotMcpServer";
@@ -37,6 +37,7 @@ export class ExportShapeArgs {
                     "the image data is returned directly for you to see."
             ),
         fileId: FILE_ID_SCHEMA,
+        pageId: PAGE_ID_SCHEMA,
     };
 
     shapeId!: string;
@@ -48,6 +49,8 @@ export class ExportShapeArgs {
     filePath?: string;
 
     fileId?: string;
+
+    pageId?: string;
 }
 
 /**
@@ -153,8 +156,11 @@ export class ExportShapeTool extends Tool<ExportShapeArgs> {
         const code = `return penpotUtils.exportImage(${shapeCode}, "${args.mode}", ${asSvg});`;
 
         // execute the code and obtain the image data
-        const task = new ExecuteCodePluginTask({ code: code });
-        const result = await this.mcpServer.pluginBridge.executePluginTask(task, { fileId: args.fileId });
+        const task = new ExecuteCodePluginTask({ code: code, pageId: args.pageId });
+        const result = await this.mcpServer.pluginBridge.executePluginTask(task, {
+            fileId: args.fileId,
+            pageId: args.pageId,
+        });
         const imageData = result.data!.result;
 
         // handle output and return response

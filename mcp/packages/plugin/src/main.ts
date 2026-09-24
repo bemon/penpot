@@ -1,5 +1,5 @@
 import "./style.css";
-import type { PluginFileInfo, PluginRegisterMessage } from "../../common/src";
+import type { PluginFileInfo, PluginPageInfo, PluginRegisterMessage } from "../../common/src";
 
 /**
  * the maximum allowed size for task responses sent back to the MCP server in the integrated remote MCP mode.
@@ -39,6 +39,9 @@ let isIntegratedRemoteMcp = false;
 
 /** descriptor of the file this plugin instance operates on, as last reported by plugin.ts */
 let currentFileInfo: PluginFileInfo | null = null;
+
+/** descriptor of the page shown in this tab, as last reported by plugin.ts */
+let currentPageInfo: PluginPageInfo | null = null;
 
 const statusPill = document.getElementById("connection-status") as HTMLElement;
 const statusText = document.getElementById("status-text") as HTMLElement;
@@ -139,7 +142,7 @@ function sendTaskResponse(response: any): void {
  */
 function sendRegistration(): void {
     if (currentFileInfo && ws?.readyState === WebSocket.OPEN) {
-        const message: PluginRegisterMessage = { type: "register", file: currentFileInfo };
+        const message: PluginRegisterMessage = { type: "register", file: currentFileInfo, page: currentPageInfo };
         ws.send(JSON.stringify(message));
     }
 }
@@ -325,6 +328,7 @@ window.addEventListener("message", (event) => {
     }
     if (event.data.type === "file-info") {
         currentFileInfo = event.data.file;
+        currentPageInfo = event.data.page ?? null;
         sendRegistration();
     }
     if (event.data.type === "start-server") {

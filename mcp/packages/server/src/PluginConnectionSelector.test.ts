@@ -14,6 +14,7 @@ function connection(
     return {
         connectionId,
         file: fileId === null ? null : { fileId, fileName: `File ${fileId}`, projectName: `Project ${fileId}` },
+        page: null,
         connectedAt: NOW - 60_000,
         lastHeartbeat: NOW - 1_000,
         frozen: false,
@@ -41,7 +42,7 @@ test("lists the connected files when the requested file is not connected", () =>
     const selector = new PluginConnectionSelector(NO_CONNECTION, NOW);
     assert.throws(
         () => selector.select([connection("c1", "alpha")], "gamma"),
-        /No connected Penpot file has the ID 'gamma'[\s\S]*'File alpha' \(fileId: alpha, project 'Project alpha'\)/
+        /No connected Penpot file has the ID 'gamma'[\s\S]*'File alpha' \(fileId: alpha, project 'Project alpha'/
     );
 });
 
@@ -98,6 +99,10 @@ test("summarizes connections per file with the best status of its tabs", () => {
             teamName: null,
             connections: 2,
             status: "ready",
+            tabs: [
+                { pageId: null, pageName: null, status: "ready" },
+                { pageId: null, pageName: null, status: "stale" },
+            ],
         },
         {
             fileId: "beta",
@@ -106,6 +111,56 @@ test("summarizes connections per file with the best status of its tabs", () => {
             teamName: null,
             connections: 1,
             status: "frozen",
+            tabs: [{ pageId: null, pageName: null, status: "frozen" }],
         },
     ]);
+});
+
+function page(pageId: string): { page: { pageId: string; pageName: string } } {
+    return { page: { pageId, pageName: `Page ${pageId}` } };
+}
+
+test("selects the tab showing the requested page", () => {
+    const onPage1 = connection("c1", "alpha", { ...page("p1"), connectedAt: NOW - 10_000 });
+    const onPage2 = connection("c2", "alpha", { ...page("p2"), connectedAt: NOW - 60_000 });
+    assert.equal(new PluginConnectionSelector(NO_CONNECTION, NOW).select([onPage1, onPage2], "alpha", "p2"), onPage2);
+});
+
+test("selects the tab showing the requested page when no file ID is given", () => {
+    const alpha = connection("c1", "alpha", page("p1"));
+    const beta = connection("c2", "beta", page("p2"));
+    assert.equal(new PluginConnectionSelector(NO_CONNECTION, NOW).select([alpha, beta], undefined, "p2"), beta);
+});
+
+test("prefers a ready tab among tabs showing the requested page", () => {
+    const ready = connection("c1", "alpha", { ...page("p1"), connectedAt: NOW - 60_000 });
+    const frozen = connection("c2", "alpha", { ...page("p1"), connectedAt: NOW - 10_000, frozen: true });
+    assert.equal(new PluginConnectionSelector(NO_CONNECTION, NOW).select([ready, frozen], "alpha", "p1"), ready);
+});
+
+test("falls back to the best tab of the file when no tab shows the requested page", () => {
+    const older = connection("c1", "alpha", { ...page("p1"), connectedAt: NOW - 60_000 });
+    const newer = connection("c2", "alpha", { ...page("p2"), connectedAt: NOW - 10_000 });
+    assert.equal(new PluginConnectionSelector(NO_CONNECTION, NOW).select([older, newer], "alpha", "p9"), newer);
+});
+
+test("refuses to guess the file when no tab shows the requested page", () => {
+    const selector = new PluginConnectionSelector(NO_CONNECTION, NOW);
+    assert.throws(
+        () =>
+            selector.select(
+                [connection("c1", "alpha", page("p1")), connection("c2", "beta", page("p2"))],
+                undefined,
+                "p9"
+            ),
+        /2 Penpot files are connected/
+    );
+});
+
+test("lists the pages shown in each tab when the requested file is not connected", () => {
+    const selector = new PluginConnectionSelector(NO_CONNECTION, NOW);
+    assert.throws(
+        () => selector.select([connection("c1", "alpha", page("p1"))], "gamma"),
+        /'File alpha' \(fileId: alpha, project 'Project alpha'; tabs on pages: 'Page p1' \(pageId: p1\)\)/
+    );
 });

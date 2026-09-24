@@ -21,6 +21,8 @@ export class ListConnectedFilesTool extends Tool<EmptyToolArgs> {
             "Lists the Penpot files that are currently connected (each browser tab running the Penpot MCP plugin " +
             "connects the file open in it), with their IDs, names and projects. " +
             "Pass a file's `fileId` to other Penpot tools to choose the file they operate on. " +
+            "`tabs` lists the browser tabs that have the file open and the page each one shows; pass a " +
+            "`pageId` to run a task on that page (a tab showing it is used, otherwise a tab switches to it). " +
             "`status` is `ready` for a live tab, `stale` for a tab that has not answered recently " +
             "(suspended by the browser) and `frozen` for a tab the browser froze; " +
             "tools fail for such tabs until the user focuses them."

@@ -155,6 +155,11 @@ Agents call `list_connected_files` to see the connected files and pass a file's 
 to `execute_code`, `export_shape` and `import_image`. With only one file connected,
 `fileId` may be left out. Each file keeps its own `storage` object.
 
+You can also open the same file in several tabs, each showing a different page.
+`list_connected_files` shows the page of each tab, and the tools accept a `pageId`:
+the task runs in the tab showing that page, or a tab of the file switches to it first,
+since Penpot only lets a plugin change the page that is active in its tab.
+
 Background tabs are more likely to be frozen or unloaded by the browser, so follow the
 advice above on keeping Penpot tabs active.
 

@@ -67,6 +67,11 @@ export interface ExecuteCodeTaskParams {
      * The JavaScript code to be executed.
      */
     code: string;
+
+    /**
+     * The ID of the page to make active before the code runs, if any.
+     */
+    pageId?: string;
 }
 
 /**
@@ -123,11 +128,27 @@ export interface PluginFileInfo {
 }
 
 /**
- * Message sent from plugin to server to announce the file the plugin operates on.
+ * Descriptor of the page shown in the browser tab of a plugin instance.
+ */
+export interface PluginPageInfo {
+    /**
+     * The ID of the page.
+     */
+    pageId: string;
+
+    /**
+     * The name of the page.
+     */
+    pageName: string;
+}
+
+/**
+ * Message sent from plugin to server to announce the file and page the plugin operates on.
  *
- * Sent whenever the WebSocket opens and whenever the file changes.
+ * Sent whenever the WebSocket opens and whenever the file or page changes.
  */
 export interface PluginRegisterMessage {
     type: "register";
     file: PluginFileInfo;
+    page?: PluginPageInfo | null;
 }

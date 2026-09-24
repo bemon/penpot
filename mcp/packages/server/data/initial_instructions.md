@@ -4,6 +4,8 @@ Each browser tab running the plugin connects the file open in it, so several fil
 can be connected at the same time. Use `list_connected_files` to see them. If more than one file is connected,
 pass the `fileId` argument to every tool that operates on a file (`execute_code`, `export_shape`, `import_image`);
 otherwise the call fails.
+Code can only modify the page that is active in its tab. To work on a specific page, pass its `pageId` (also listed by
+`list_connected_files`, per tab): the task runs in a tab showing that page, or a tab of the file switches to it first.
 
 # Executing Code
 

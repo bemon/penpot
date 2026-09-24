@@ -1,6 +1,7 @@
 import { Task, TaskHandler } from "../TaskHandler";
 import { ExecuteCodeTaskParams, ExecuteCodeTaskResultData } from "../../../common/src";
 import { PenpotUtils } from "../PenpotUtils.ts";
+import { activatePage } from "../PageActivation";
 
 /**
  * Console implementation that captures all log output for code execution.
@@ -189,6 +190,8 @@ export class ExecuteCodeTaskHandler extends TaskHandler<ExecuteCodeTaskParams> {
             task.sendError("executeCode task requires 'code' parameter");
             return;
         }
+
+        await activatePage(penpot, task.params.pageId);
 
         this.context.console.resetLog();
 

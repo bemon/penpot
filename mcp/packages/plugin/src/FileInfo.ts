@@ -1,4 +1,4 @@
-import type { PluginFileInfo } from "../../common/src";
+import type { PluginFileInfo, PluginPageInfo } from "../../common/src";
 
 /**
  * Project and team of the current file, as provided by the Penpot-integrated MCP extension.
@@ -27,4 +27,14 @@ export function buildFileInfo(file: { id: string; name: string } | null, context
     if (context?.teamId) info.teamId = context.teamId;
     if (context?.teamName) info.teamName = context.teamName;
     return info;
+}
+
+/**
+ * Builds the descriptor of the page shown in the plugin's tab, as reported to the MCP server.
+ *
+ * @param page - the current Penpot page, or null if no page is shown
+ * @returns the descriptor, or null if no page is shown
+ */
+export function buildPageInfo(page: { id: string; name: string } | null): PluginPageInfo | null {
+    return page ? { pageId: page.id, pageName: page.name } : null;
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildFileInfo } from "./FileInfo.ts";
+import { buildFileInfo, buildPageInfo } from "./FileInfo.ts";
 
 test("returns null when no file is open", () => {
     assert.equal(buildFileInfo(null), null);
@@ -29,4 +29,12 @@ test("leaves out context fields that are null", () => {
         fileName: "Landing page",
         projectId: "p1",
     });
+});
+
+test("returns no page descriptor when no page is shown", () => {
+    assert.equal(buildPageInfo(null), null);
+});
+
+test("builds the descriptor of the shown page", () => {
+    assert.deepEqual(buildPageInfo({ id: "p1", name: "Components" }), { pageId: "p1", pageName: "Components" });
 });

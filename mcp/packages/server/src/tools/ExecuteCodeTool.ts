@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FILE_ID_SCHEMA, Tool } from "../Tool";
+import { FILE_ID_SCHEMA, PAGE_ID_SCHEMA, Tool } from "../Tool";
 import type { ToolResponse } from "../ToolResponse";
 import { TextResponse } from "../ToolResponse";
 import "reflect-metadata";
@@ -17,6 +17,7 @@ export class ExecuteCodeArgs {
             .min(1, "Code cannot be empty")
             .describe("The JavaScript code to execute in the plugin context."),
         fileId: FILE_ID_SCHEMA,
+        pageId: PAGE_ID_SCHEMA,
     };
 
     /**
@@ -28,6 +29,11 @@ export class ExecuteCodeArgs {
      * The ID of the Penpot file in which to execute the code.
      */
     fileId?: string;
+
+    /**
+     * The ID of the page on which to execute the code.
+     */
+    pageId?: string;
 }
 
 /**
@@ -72,9 +78,12 @@ export class ExecuteCodeTool extends Tool<ExecuteCodeArgs> {
     }
 
     protected async executeCore(args: ExecuteCodeArgs): Promise<ToolResponse> {
-        const taskParams: ExecuteCodeTaskParams = { code: args.code };
+        const taskParams: ExecuteCodeTaskParams = { code: args.code, pageId: args.pageId };
         const task = new ExecuteCodePluginTask(taskParams);
-        const result = await this.mcpServer.pluginBridge.executePluginTask(task, { fileId: args.fileId });
+        const result = await this.mcpServer.pluginBridge.executePluginTask(task, {
+            fileId: args.fileId,
+            pageId: args.pageId,
+        });
 
         if (result.data !== undefined) {
             return new TextResponse(JSON.stringify(result.data, null, 2));

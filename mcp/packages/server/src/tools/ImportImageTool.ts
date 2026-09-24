@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FILE_ID_SCHEMA, Tool } from "../Tool";
+import { FILE_ID_SCHEMA, PAGE_ID_SCHEMA, Tool } from "../Tool";
 import { TextResponse, ToolResponse } from "../ToolResponse";
 import "reflect-metadata";
 import { PenpotMcpServer } from "../PenpotMcpServer";
@@ -31,6 +31,7 @@ export class ImportImageArgs {
                 "Optional height for the rectangle. If only height is provided, width is calculated to maintain aspect ratio."
             ),
         fileId: FILE_ID_SCHEMA,
+        pageId: PAGE_ID_SCHEMA,
     };
 
     filePath!: string;
@@ -44,6 +45,8 @@ export class ImportImageArgs {
     height?: number;
 
     fileId?: string;
+
+    pageId?: string;
 }
 
 /**
@@ -118,8 +121,11 @@ export class ImportImageTool extends Tool<ImportImageArgs> {
                 ${args.width ?? "undefined"}, ${args.height ?? "undefined"});
             return { shapeId: rectangle.id };
             `;
-        const task = new ExecuteCodePluginTask({ code: code });
-        const executionResult = await this.mcpServer.pluginBridge.executePluginTask(task, { fileId: args.fileId });
+        const task = new ExecuteCodePluginTask({ code: code, pageId: args.pageId });
+        const executionResult = await this.mcpServer.pluginBridge.executePluginTask(task, {
+            fileId: args.fileId,
+            pageId: args.pageId,
+        });
 
         return new TextResponse(JSON.stringify(executionResult.data?.result, null, 2));
     }

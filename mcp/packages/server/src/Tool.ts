@@ -24,6 +24,19 @@ export const FILE_ID_SCHEMA = z
     );
 
 /**
+ * Schema of the optional `pageId` argument of tools that operate on a Penpot file.
+ */
+export const PAGE_ID_SCHEMA = z
+    .string()
+    .min(1, "pageId cannot be empty")
+    .optional()
+    .describe(
+        "ID of the page to operate on, as listed by the `list_connected_files` tool. The task runs in a browser " +
+            "tab showing this page; if no tab shows it, a tab of the file switches to it first. " +
+            "If omitted, the page currently shown in the chosen tab is used."
+    );
+
+/**
  * Base class for type-safe tools with automatic schema generation and validation.
  *
  * This class provides type safety through automatic validation and strongly-typed

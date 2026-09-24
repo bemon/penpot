@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePluginFileInfo, toConnectionDescriptor } from "./PluginConnection";
+import { parsePluginFileInfo, parsePluginPageInfo, toConnectionDescriptor } from "./PluginConnection";
 
 test("parses a complete file descriptor", () => {
     const file = {
@@ -48,6 +48,7 @@ test("strips non-descriptor state from a connection", () => {
     const connection = {
         connectionId: "c1",
         file: { fileId: "f1", fileName: "Landing page" },
+        page: { pageId: "p1", pageName: "Components" },
         connectedAt: 1,
         lastHeartbeat: 2,
         frozen: false,
@@ -57,8 +58,21 @@ test("strips non-descriptor state from a connection", () => {
     assert.deepEqual(toConnectionDescriptor(connection), {
         connectionId: "c1",
         file: { fileId: "f1", fileName: "Landing page" },
+        page: { pageId: "p1", pageName: "Components" },
         connectedAt: 1,
         lastHeartbeat: 2,
         frozen: false,
     });
+});
+
+test("parses a page descriptor", () => {
+    assert.deepEqual(parsePluginPageInfo({ pageId: "p1", pageName: "Components", extra: 1 }), {
+        pageId: "p1",
+        pageName: "Components",
+    });
+});
+
+test("rejects a page descriptor without a page ID", () => {
+    assert.equal(parsePluginPageInfo({ pageName: "Components" }), null);
+    assert.equal(parsePluginPageInfo(null), null);
 });

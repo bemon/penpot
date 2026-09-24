@@ -75,7 +75,7 @@ Some important concepts for users:
 * **Integrations page**: MCP is configured under **Your account → Integrations → MCP Server**. Here you enable or disable MCP, get the server URL and manage the MCP key.
 * **MCP key**: a personal, non-recoverable token that authenticates your AI client with the MCP server. Only one key can exist per user at a time. This is used by the remote MCP setup.
 * **Currently focused page**: for each connected file, MCP operates on the page in focus in that file's tab. If you change the focused page, the MCP context for that file follows it.
-* **Connected files**: every Penpot tab with MCP connected makes its file available to your agents. With several files connected, agents list them with `list_connected_files` and name the file in each tool call, so they can work on files from different projects at the same time.
+* **Connected files**: every Penpot tab with MCP connected makes its file available to your agents. With several files connected, agents list them with `list_connected_files` and name the file in each tool call, so they can work on files from different projects at the same time. You can also open one file in several tabs on different pages; agents then name the page too.
 
 ### Tools and capabilities
 

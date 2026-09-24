@@ -1,7 +1,7 @@
 import { ExecuteCodeTaskHandler } from "./task-handlers/ExecuteCodeTaskHandler";
 import { Task, TaskHandler } from "./TaskHandler";
 import { formatTaskError } from "./ErrorUtils";
-import { buildFileInfo } from "./FileInfo";
+import { buildFileInfo, buildPageInfo } from "./FileInfo";
 
 /**
  * indicates whether the plugin is running in an environment with the Penpot-integrated remote MCP server
@@ -21,12 +21,13 @@ function extractVersionPrefix(version: string): string {
 }
 
 /**
- * Sends the descriptor of the current file to the UI, which reports it to the MCP server.
+ * Sends the descriptors of the current file and page to the UI, which reports them to the MCP server.
  */
 function sendFileInfo(): void {
     penpot.ui.sendMessage({
         type: "file-info",
         file: buildFileInfo(penpot.currentFile, mcp?.getFileContext?.()),
+        page: buildPageInfo(penpot.currentPage),
     });
 }
 
@@ -133,8 +134,9 @@ if (mcp) {
     });
 }
 
-// report the new file when a different file is opened in this tab
+// report the new file or page when it changes in this tab
 penpot.on("filechange", () => sendFileInfo());
+penpot.on("pagechange", () => sendFileInfo());
 
 // Handle theme change in the iframe
 penpot.on("themechange", (theme) => {
