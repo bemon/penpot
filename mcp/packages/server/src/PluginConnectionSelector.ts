@@ -4,6 +4,16 @@ import type { PluginConnectionDescriptor } from "./PluginConnection";
 const STATUS_RANK: Record<PluginStatus, number> = { ready: 2, stale: 1, frozen: 0 };
 
 /**
+ * Summary of one browser tab running the plugin, as reported to MCP clients.
+ */
+export interface ConnectedTabSummary {
+    /** ID of the page shown in the tab; null if the plugin has not reported it. */
+    pageId: string | null;
+    pageName: string | null;
+    status: PluginStatus;
+}
+
+/**
  * Summary of a connected Penpot file, as reported to MCP clients.
  */
 export interface ConnectedFileSummary {
@@ -16,14 +26,17 @@ export interface ConnectedFileSummary {
     connections: number;
     /** best liveness status among these connections. */
     status: PluginStatus;
+    /** the tabs that have the file open, the one preferred for tasks first. */
+    tabs: ConnectedTabSummary[];
 }
 
 /**
  * Chooses the plugin connection that runs a task and describes the connected files.
  *
- * Without a target file, the choice is only made when all candidates operate on the same file.
- * Among several connections for one file (the file being open in several tabs), the one with the
- * best liveness status wins, then the most recently established one.
+ * A requested page is served by a tab showing it; if no tab does, the choice falls back to the file,
+ * whose chosen tab then has to switch to the page. Without a target file, the choice is only made when
+ * all candidates operate on the same file. Among several suitable tabs, the one with the best liveness
+ * status wins, then the most recently established one.
  */
 export class PluginConnectionSelector {
     /**
@@ -42,9 +55,10 @@ export class PluginConnectionSelector {
      *
      * @param candidates - The connections owned by the requesting user
      * @param fileId - The ID of the target file; may be omitted if only one file is connected
+     * @param pageId - The ID of the target page, if any
      * @throws Error with guidance for the caller if nothing matches or the choice is ambiguous
      */
-    public select<T extends PluginConnectionDescriptor>(candidates: T[], fileId?: string): T {
+    public select<T extends PluginConnectionDescriptor>(candidates: T[], fileId?: string, pageId?: string): T {
         if (candidates.length === 0) {
             throw new Error(this.noConnectionMessage);
         }
@@ -55,17 +69,27 @@ export class PluginConnectionSelector {
             if (pool.length === 0) {
                 throw new Error(`No connected Penpot file has the ID '${fileId}'. ${this.describe(candidates)}`);
             }
-        } else {
+        }
+
+        if (pageId !== undefined) {
+            const onPage = pool.filter((candidate) => candidate.page?.pageId === pageId);
+            if (onPage.length > 0) {
+                return this.best(onPage);
+            }
+        }
+
+        if (fileId === undefined) {
             const fileCount = new Set(candidates.map(PluginConnectionSelector.fileKey)).size;
             if (fileCount > 1) {
+                const pageNote = pageId !== undefined ? ` and no tab shows the page '${pageId}'` : "";
                 throw new Error(
-                    `${fileCount} Penpot files are connected, so the target file is ambiguous; ` +
+                    `${fileCount} Penpot files are connected${pageNote}, so the target file is ambiguous; ` +
                         `pass the \`fileId\` argument to choose one. ${this.describe(candidates)}`
                 );
             }
         }
 
-        return pool.reduce((best, candidate) => (this.isPreferred(candidate, best) ? candidate : best));
+        return this.best(pool);
     }
 
     /**
@@ -90,14 +114,19 @@ export class PluginConnectionSelector {
 
     private summarizeGroup(group: PluginConnectionDescriptor[]): ConnectedFileSummary {
         const file = group[0].file;
-        const best = group.reduce((a, b) => (this.isPreferred(b, a) ? b : a));
+        const tabs = [...group].sort((a, b) => (this.isPreferred(a, b) ? -1 : this.isPreferred(b, a) ? 1 : 0));
         return {
             fileId: file?.fileId ?? null,
             fileName: file?.fileName ?? null,
             projectName: file?.projectName ?? null,
             teamName: file?.teamName ?? null,
             connections: group.length,
-            status: this.statusOf(best),
+            status: this.statusOf(tabs[0]),
+            tabs: tabs.map((tab) => ({
+                pageId: tab.page?.pageId ?? null,
+                pageName: tab.page?.pageName ?? null,
+                status: this.statusOf(tab),
+            })),
         };
     }
 
@@ -111,7 +140,15 @@ export class PluginConnectionSelector {
             return "(a plugin that has not reported its file yet)";
         }
         const project = file.projectName ? `, project '${file.projectName}'` : "";
-        return `'${file.fileName}' (fileId: ${file.fileId}${project})`;
+        const pages = file.tabs
+            .filter((tab) => tab.pageId !== null)
+            .map((tab) => `'${tab.pageName}' (pageId: ${tab.pageId})`);
+        const tabs = pages.length > 0 ? `; tabs on pages: ${pages.join(", ")}` : "";
+        return `'${file.fileName}' (fileId: ${file.fileId}${project}${tabs})`;
+    }
+
+    private best<T extends PluginConnectionDescriptor>(pool: T[]): T {
+        return pool.reduce((best, candidate) => (this.isPreferred(candidate, best) ? candidate : best));
     }
 
     private isPreferred(candidate: PluginConnectionDescriptor, current: PluginConnectionDescriptor): boolean {

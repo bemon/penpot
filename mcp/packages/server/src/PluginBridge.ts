@@ -6,7 +6,12 @@ import { RemotePluginTask } from "./RemotePluginTask";
 import { PluginTaskRequest, PluginTaskResponse, PluginTaskResult } from "@penpot/mcp-common";
 import { createLogger } from "./logger";
 import { assertPluginResponsive } from "./PluginLiveness";
-import { parsePluginFileInfo, PluginConnectionDescriptor, toConnectionDescriptor } from "./PluginConnection";
+import {
+    parsePluginFileInfo,
+    parsePluginPageInfo,
+    PluginConnectionDescriptor,
+    toConnectionDescriptor,
+} from "./PluginConnection";
 import { ConnectedFileSummary, PluginConnectionSelector } from "./PluginConnectionSelector";
 import type { PenpotMcpServer } from "./PenpotMcpServer";
 import type { RedisBridge } from "./RedisBridge";
@@ -48,6 +53,11 @@ export interface PluginTaskTarget {
      * ID of the Penpot file in which to run the task; may be omitted if only one file is connected.
      */
     fileId?: string;
+
+    /**
+     * ID of the page to run the task on; a tab showing this page is preferred.
+     */
+    pageId?: string;
 }
 
 /**
@@ -125,6 +135,7 @@ export class PluginBridge {
             const connection: ClientConnection = {
                 connectionId: randomUUID(),
                 file: null,
+                page: null,
                 connectedAt: Date.now(),
                 lastHeartbeat: Date.now(),
                 frozen: false,
@@ -212,7 +223,7 @@ export class PluginBridge {
                 return;
             }
             if (message?.type === "register") {
-                this.registerFile(connection, message.file);
+                this.registerFile(connection, message.file, message.page);
                 this.publishToRegistry(connection);
                 return;
             }
@@ -223,19 +234,26 @@ export class PluginBridge {
     }
 
     /**
-     * Records the Penpot file that a plugin connection operates on.
+     * Records the Penpot file and page that a plugin connection operates on.
      *
-     * @param connection - The connection whose file is reported
+     * @param connection - The connection whose file and page are reported
      * @param rawFile - The file descriptor as sent by the plugin
+     * @param rawPage - The page descriptor as sent by the plugin; absent for older plugins
      */
-    private registerFile(connection: ClientConnection, rawFile: unknown): void {
+    private registerFile(connection: ClientConnection, rawFile: unknown, rawPage: unknown): void {
         const file = parsePluginFileInfo(rawFile);
         if (!file) {
             this.logger.warn("Ignoring malformed register message on connection %s", connection.connectionId);
             return;
         }
         connection.file = file;
-        this.logger.info("Connection %s operates on file %s", connection.connectionId, file.fileId);
+        connection.page = parsePluginPageInfo(rawPage);
+        this.logger.info(
+            "Connection %s operates on file %s, page %s",
+            connection.connectionId,
+            file.fileId,
+            connection.page?.pageId ?? "<unknown>"
+        );
     }
 
     /**
@@ -413,10 +431,14 @@ export class PluginBridge {
         const userToken = this.getSessionUserToken();
         if (this.redisBridge) {
             const candidates = await this.redisBridge.listConnections(userToken!);
-            const connection = this.createSelector().select(candidates, target.fileId);
+            const connection = this.createSelector().select(candidates, target.fileId, target.pageId);
             this.sendPluginTaskViaRedis(task, userToken!, connection.connectionId);
         } else {
-            const connection = this.createSelector().select(this.getLocalConnections(userToken), target.fileId);
+            const connection = this.createSelector().select(
+                this.getLocalConnections(userToken),
+                target.fileId,
+                target.pageId
+            );
             this.sendPluginTask(task, connection);
         }
         return await task.getResultPromise();

@@ -129,6 +129,8 @@ test("exposes list_connected_files and an optional fileId argument on file-bound
             const tool = tools.find((tool) => tool.name === name);
             assert.ok(tool?.inputSchema.properties?.fileId, `${name} lacks a fileId argument`);
             assert.ok(!tool?.inputSchema.required?.includes("fileId"), `${name} requires fileId`);
+            assert.ok(tool?.inputSchema.properties?.pageId, `${name} lacks a pageId argument`);
+            assert.ok(!tool?.inputSchema.required?.includes("pageId"), `${name} requires pageId`);
         }
     } finally {
         await client.close();
@@ -149,7 +151,7 @@ test("passes the fileId argument of execute_code to the plugin bridge", async (t
     );
 
     assert.equal(response.status, 200);
-    assert.deepEqual(receivedTarget, { fileId: "file-1" });
+    assert.deepEqual(receivedTarget, { fileId: "file-1", pageId: undefined });
 });
 
 test("list_connected_files reports the files known to the plugin bridge", async (t) => {
@@ -175,4 +177,24 @@ test("list_connected_files reports the files known to the plugin bridge", async 
     const content = body.result.content[0];
     assert.equal(content.type, "text");
     assert.deepEqual(JSON.parse(content.text), files);
+});
+
+test("passes the pageId argument of execute_code to the plugin bridge and the plugin", async (t) => {
+    let receivedTarget: unknown;
+    let receivedParams: unknown;
+    t.mock.method(server.pluginBridge, "executePluginTask", async (task: { params: unknown }, target: unknown) => {
+        receivedTarget = target;
+        receivedParams = task.params;
+        return { data: { result: null, log: "" } };
+    });
+
+    const response = await modernRequest(
+        "tools/call",
+        { name: "execute_code", arguments: { code: "return 1;", fileId: "file-1", pageId: "page-2" } },
+        "?userToken=alice"
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(receivedTarget, { fileId: "file-1", pageId: "page-2" });
+    assert.deepEqual(receivedParams, { code: "return 1;", pageId: "page-2" });
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { afterEach, beforeEach, test } from "node:test";
 import { WebSocket } from "ws";
-import type { PluginFileInfo, PluginTaskRequest } from "@penpot/mcp-common";
+import type { PluginFileInfo, PluginPageInfo, PluginTaskRequest } from "@penpot/mcp-common";
 import { MAX_CONNECTIONS_PER_USER } from "./PluginBridge";
 import { PenpotMcpServer } from "./PenpotMcpServer";
 import { HEARTBEAT_STALE_THRESHOLD_MS } from "./PluginLiveness";
@@ -45,23 +45,41 @@ function openSocket(userToken?: string): WebSocket {
     return socket;
 }
 
+/** page last reported by each fake plugin; fake plugins answer tasks with it. */
+const shownPages = new WeakMap<WebSocket, PluginPageInfo>();
+
 /**
- * Connects a fake plugin that registers the given file and answers every task with the file's ID.
+ * Connects a fake plugin that registers the given file and page and answers every task with the ID
+ * of the page it shows, or of its file if it shows no page.
  */
-async function connectPlugin(file: PluginFileInfo | null, userToken?: string): Promise<WebSocket> {
+async function connectPlugin(
+    file: PluginFileInfo | null,
+    userToken?: string,
+    page?: PluginPageInfo
+): Promise<WebSocket> {
     const socket = openSocket(userToken);
+    if (page) {
+        shownPages.set(socket, page);
+    }
     socket.on("message", (raw) => {
         const request = JSON.parse(raw.toString()) as PluginTaskRequest;
         if (!request.task) {
             return;
         }
-        socket.send(JSON.stringify({ id: request.id, success: true, data: { result: file?.fileId ?? null, log: "" } }));
+        const result = shownPages.get(socket)?.pageId ?? file?.fileId ?? null;
+        socket.send(JSON.stringify({ id: request.id, success: true, data: { result, log: "" } }));
     });
     await once(socket, "open");
     if (file) {
-        socket.send(JSON.stringify({ type: "register", file }));
+        socket.send(JSON.stringify({ type: "register", file, page: page ?? null }));
     }
     return socket;
+}
+
+/** Makes a fake plugin report that its tab now shows the given page. */
+function showPage(socket: WebSocket, file: PluginFileInfo, page: PluginPageInfo): void {
+    shownPages.set(socket, page);
+    socket.send(JSON.stringify({ type: "register", file, page }));
 }
 
 async function waitUntilRegistered(connectionCount: number, userToken?: string): Promise<void> {
@@ -80,9 +98,9 @@ async function waitUntilRegistered(connectionCount: number, userToken?: string):
     throw new Error(`server did not register ${connectionCount} plugin connections`);
 }
 
-function runCode(fileId?: string, userToken?: string) {
+function runCode(fileId?: string, userToken?: string, pageId?: string) {
     return server!.runWithSessionContext({ userToken }, () =>
-        server!.pluginBridge.executePluginTask(new ExecuteCodePluginTask({ code: "return 1;" }), { fileId })
+        server!.pluginBridge.executePluginTask(new ExecuteCodePluginTask({ code: "return 1;" }), { fileId, pageId })
     );
 }
 
@@ -241,4 +259,46 @@ test("rejects tasks for a tab that answers no pings", async (t) => {
     await waitForStatus("alpha", "stale");
 
     await assert.rejects(runCode("alpha"), /appears to be suspended by the browser/);
+});
+
+const page1: PluginPageInfo = { pageId: "page-1", pageName: "Page 1" };
+const components: PluginPageInfo = { pageId: "page-components", pageName: "Components" };
+
+test("routes a task to the tab showing the requested page", async () => {
+    await startServer(false);
+    await connectPlugin(alpha, undefined, page1);
+    await connectPlugin(alpha, undefined, components);
+    await waitUntilRegistered(2);
+
+    assert.equal((await runCode("alpha", undefined, "page-1")).data?.result, "page-1");
+    assert.equal((await runCode("alpha", undefined, "page-components")).data?.result, "page-components");
+});
+
+test("follows a page change reported by a tab", async () => {
+    await startServer(false);
+    const first = await connectPlugin(alpha, undefined, page1);
+    await connectPlugin(alpha, undefined, page1);
+    await waitUntilRegistered(2);
+
+    showPage(first, alpha, components);
+
+    for (let attempt = 0; attempt < 50; attempt++) {
+        const files = await server!.pluginBridge.listConnectedFiles();
+        if (files[0].tabs.some((tab) => tab.pageId === "page-components")) {
+            break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal((await runCode("alpha", undefined, "page-components")).data?.result, "page-components");
+});
+
+test("lists the page shown in each tab", async () => {
+    await startServer(false);
+    await connectPlugin(alpha, undefined, page1);
+    await connectPlugin(alpha, undefined, components);
+    await waitUntilRegistered(2);
+
+    const [file] = await server!.pluginBridge.listConnectedFiles();
+
+    assert.deepEqual(file.tabs.map((tab) => tab.pageName).sort(), ["Components", "Page 1"]);
 });
